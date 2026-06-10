@@ -1,0 +1,87 @@
+name: SoundboardApp
+options:
+  bundleIdPrefix: ca.borisvanin
+  deploymentTarget:
+    macOS: "14.2"
+  xcodeVersion: "16.2"
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    SWIFT_APPROACHABLE_CONCURRENCY: YES
+    SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+    SUPPORTED_PLATFORMS: "macosx"
+
+projectReferences:
+  MixerModel:
+    path: ../MixerModel/MixerModel.xcodeproj
+  MixerEngine:
+    path: ../MixerEngine/MixerEngine.xcodeproj
+  MIDISurface:
+    path: ../MIDISurface/MIDISurface.xcodeproj
+  DriverControl:
+    path: ../DriverControl/DriverControl.xcodeproj
+
+targets:
+  SoundboardApp:
+    type: application
+    platform: macOS
+    sources:
+      - Sources
+      - Resources
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: "Soundboard"
+        NSMicrophoneUsageDescription: "Soundboard captures audio from your apps and microphone to mix them."
+        # Required for the system-audio process tap (kTCCServiceAudioCapture) — distinct
+        # from the microphone grant; without it macOS silently feeds the tap silence.
+        NSAudioCaptureUsageDescription: "Soundboard captures your Mac's system audio to mix it with your microphone."
+    entitlements:
+      path: SoundboardApp.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.security.device.audio-input: true
+    dependencies:
+      - target: MixerModel/MixerModel
+        embed: true
+      - target: MixerEngine/MixerEngine
+        embed: true
+      - target: MIDISurface/MIDISurface
+        embed: true
+      - target: DriverControl/DriverControl
+        embed: true
+    settings:
+      base:
+        # The product is "Soundboard" even though the target/scheme is
+        # "SoundboardApp": this names the bundle Soundboard.app and sets
+        # CFBundleName/executable to Soundboard (what Finder, the installer, and
+        # System Settings ▸ Accessibility display).
+        PRODUCT_NAME: Soundboard
+        PRODUCT_BUNDLE_IDENTIFIER: ca.borisvanin.soundboard.app
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_PREVIEWS: YES
+        ENABLE_HARDENED_RUNTIME: YES
+      configs:
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG $(inherited)"
+          SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+        Release:
+          SWIFT_COMPILATION_MODE: wholemodule
+
+# A shared scheme so `xcodebuild -workspace … -scheme SoundboardApp` works from the
+# CLI (and survives `make generate`, which regenerates the project each time).
+schemes:
+  SoundboardApp:
+    build:
+      targets:
+        SoundboardApp: all
+    run:
+      config: Debug
+    archive:
+      config: Release

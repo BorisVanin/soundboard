@@ -1,0 +1,5 @@
+#!/bin/bash
+# Runs as root after payload is laid down. Restart coreaudiod so it picks up the
+# freshly-installed HAL plug-in (it caches loaded plug-ins in memory).
+/usr/bin/killall coreaudiod 2>/dev/null || true
+exit 0

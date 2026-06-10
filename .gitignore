@@ -1,0 +1,13 @@
+*.xcodeproj
+.bin
+build
+.build
+*.xcworkspace
+installer/.stage
+installer/dist
+example
+dist
+.DS_Store
+.claude
+*.pkg
+docs/github-repo-setup.md

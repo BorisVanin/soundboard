@@ -1,0 +1,45 @@
+name: LoopbackDriver
+options:
+  bundleIdPrefix: ca.borisvanin
+  deploymentTarget:
+    macOS: "14.2"
+  xcodeVersion: "16.2"
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SUPPORTED_PLATFORMS: "macosx"
+    GENERATE_INFOPLIST_FILE: NO
+
+targets:
+  # An AudioServerPlugIn is a CFPlugIn bundle with the `.driver` extension,
+  # installed into /Library/Audio/Plug-Ins/HAL/ and loaded by coreaudiod.
+  SoundboardDriver:
+    type: bundle
+    platform: macOS
+    sources:
+      - Sources
+    settings:
+      base:
+        PRODUCT_NAME: SoundboardDriver
+        PRODUCT_BUNDLE_IDENTIFIER: ca.borisvanin.soundboard.loopbackdriver
+        WRAPPER_EXTENSION: driver
+        INFOPLIST_FILE: Info.plist
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+        CODE_SIGN_STYLE: Automatic
+        # coreaudiod loads the bundle out-of-process; keep it a plain bundle.
+        MACH_O_TYPE: mh_bundle
+        GCC_C_LANGUAGE_STANDARD: gnu11
+        CLANG_CXX_LANGUAGE_STANDARD: "gnu++17"
+        CLANG_CXX_LIBRARY: "libc++"
+        CLANG_ENABLE_OBJC_ARC: NO
+      configs:
+        Debug:
+          GCC_OPTIMIZATION_LEVEL: "0"
+        Release:
+          GCC_OPTIMIZATION_LEVEL: "s"
+    dependencies:
+      - sdk: CoreAudio.framework
+      - sdk: CoreFoundation.framework
