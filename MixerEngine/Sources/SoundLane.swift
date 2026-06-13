@@ -1,6 +1,18 @@
 import Foundation
 import Accelerate
 
+/// Per-sample one-pole gain-smoothing coefficient for `g += α·(target − g)`, applied
+/// by the lane IOProcs to **de-zipper** fader/mute changes. Without it, a lane reads
+/// its gain once per buffer and multiplies the whole buffer by that held value, so a
+/// moving fader makes the applied-gain envelope a staircase — a step discontinuity at
+/// every buffer boundary whose broadband spectrum splatters into audible clicks
+/// ("zipper noise"; see README → "Known issue: fader zipper noise"). Ramping the gain
+/// per sample makes the envelope continuous, so the clicks vanish.
+///
+/// τ ≈ 10 ms at 48 kHz: α = 1 − e^(−1/(τ·fs)). ~10 ms is imperceptible against a
+/// ~1 s fader sweep yet removes the discontinuity.
+let gainSmoothingAlpha: Float = 0.0020812   // 1 - exp(-1/(0.010 * 48000))
+
 /// Producer-side handle on a lane's **per-lane buffer** (a small SPSC stereo ring
 /// owned by `MixEngine`): where the lane writes its post-gain, interleaved-stereo
 /// float audio. The mixer (in `MixEngine`) is the consumer that vDSP-sums the

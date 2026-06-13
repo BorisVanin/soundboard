@@ -20,12 +20,15 @@ public final class MicSoundLane: SoundLane {
     private var currentChannels: [Int] = []
 
     private let gainPtr = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+    /// Smoothed gain the callback actually applies (the target is `gainPtr`); ramped
+    /// per sample to de-zipper fader/mute moves. Written only by the RT callback.
+    private let smoothPtr = UnsafeMutablePointer<Float>.allocate(capacity: 1)
     private let meterL = UnsafeMutablePointer<Float>.allocate(capacity: 1)
     private let meterR = UnsafeMutablePointer<Float>.allocate(capacity: 1)
     public private(set) var meterChannelCount = 0
 
-    public init() { gainPtr.pointee = 1; meterL.pointee = 0; meterR.pointee = 0 }
-    deinit { stop(); gainPtr.deallocate(); meterL.deallocate(); meterR.deallocate() }
+    public init() { gainPtr.pointee = 1; smoothPtr.pointee = 1; meterL.pointee = 0; meterR.pointee = 0 }
+    deinit { stop(); gainPtr.deallocate(); smoothPtr.deallocate(); meterL.deallocate(); meterR.deallocate() }
 
     public var isRunning: Bool { captureUnit != nil }
 
@@ -98,11 +101,12 @@ public final class MicSoundLane: SoundLane {
 
         let chanPtr = UnsafeMutablePointer<Int32>.allocate(capacity: wanted.count)
         for (i, c) in wanted.enumerated() { chanPtr[i] = Int32(c) }
+        smoothPtr.pointee = gainPtr.pointee          // start matched: no ramp on (re)start
         let ctx = UnsafeMutablePointer<MicCaptureContext>.allocate(capacity: 1)
         ctx.pointee = MicCaptureContext(
             unit: au, inputABL: abl.unsafeMutablePointer, maxFrames: Int32(Self.maxFrames),
             micChannels: Int32(micChannels), channels: chanPtr, channelCount: Int32(wanted.count),
-            gain: gainPtr, meterL: meterL, meterR: meterR,
+            gain: gainPtr, smooth: smoothPtr, meterL: meterL, meterR: meterR,
             ringData: sink.data, frameMask: sink.frameCapacity - 1, frameCapacity: sink.frameCapacity,
             writeIdx: sink.writeIndex, readIdx: sink.readIndex)
         captureCtx = ctx
@@ -144,6 +148,7 @@ struct MicCaptureContext {
     var channels: UnsafeMutablePointer<Int32>?
     var channelCount: Int32
     var gain: UnsafeMutablePointer<Float>
+    var smooth: UnsafeMutablePointer<Float>
     var meterL: UnsafeMutablePointer<Float>
     var meterR: UnsafeMutablePointer<Float>
     var ringData: UnsafeMutablePointer<Float>
@@ -171,10 +176,10 @@ private let micCaptureCallback: AURenderCallback = {
     var flags = ioActionFlags.pointee
     if AudioUnitRender(ctx.unit, &flags, inTimeStamp, 1, inNumberFrames, ctx.inputABL) != noErr { return noErr }
 
-    let gain = ctx.gain.pointee
+    let target = ctx.gain.pointee
     let n = Int(ctx.channelCount)
     guard n > 0 else { return noErr }
-    let norm = (gain > 0 ? gain : 0) / Float(n)
+    let invN = 1 / Float(n)
     let mask = ctx.frameMask
     let data = ctx.ringData
 
@@ -191,22 +196,26 @@ private let micCaptureCallback: AURenderCallback = {
             base[k] = ch < chCount ? inABL[ch].mData?.assumingMemoryBound(to: Float.self) : nil
         }
         var lpk = ctx.meterL.pointee, rpk = ctx.meterR.pointee
+        var g = ctx.smooth.pointee                      // smoothed gain, ramped per sample
         for f in 0..<frames {
+            g += gainSmoothingAlpha * (target - g)      // de-zipper: no gain step
+            if abs(target - g) < 1e-6 { g = target }    // settle exactly (no denormals)
             var sum: Float = 0
             for k in 0..<n {
                 guard let p = base[k] else { continue }
                 let s = p[f]
                 sum += s
-                let sg = s * gain                       // meter post-gain (0 when muted)
+                let sg = s * g                          // meter post-gain (0 when muted)
                 let a = sg < 0 ? -sg : sg
                 if k & 1 == 0 { if a > lpk { lpk = a } } else if a > rpk { rpk = a }
             }
             if UInt64(f) < give {
                 let pos = Int((w &+ UInt64(f)) & mask) * 2
-                let mono = sum * norm
+                let mono = sum * g * invN
                 data[pos] = mono; data[pos + 1] = mono
             }
         }
+        ctx.smooth.pointee = g
         ctx.meterL.pointee = lpk; ctx.meterR.pointee = rpk
     }
     OSMemoryBarrier()                       // release: data writes visible before the index bump

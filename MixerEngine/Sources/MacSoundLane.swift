@@ -23,12 +23,15 @@ public final class MacSoundLane: SoundLane {
     private var currentSource: String?
 
     private let gainPtr = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+    /// Smoothed gain the IOProc actually applies (the target is `gainPtr`); ramped
+    /// per sample to de-zipper fader/mute moves. Written only by the RT IOProc.
+    private let smoothPtr = UnsafeMutablePointer<Float>.allocate(capacity: 1)
     private let meterL = UnsafeMutablePointer<Float>.allocate(capacity: 1)
     private let meterR = UnsafeMutablePointer<Float>.allocate(capacity: 1)
     public private(set) var meterChannelCount = 0
 
-    public init() { gainPtr.pointee = 1; meterL.pointee = 0; meterR.pointee = 0 }
-    deinit { stop(); gainPtr.deallocate(); meterL.deallocate(); meterR.deallocate() }
+    public init() { gainPtr.pointee = 1; smoothPtr.pointee = 1; meterL.pointee = 0; meterR.pointee = 0 }
+    deinit { stop(); gainPtr.deallocate(); smoothPtr.deallocate(); meterL.deallocate(); meterR.deallocate() }
 
     public var isRunning: Bool { procID != nil }
 
@@ -108,7 +111,8 @@ public final class MacSoundLane: SoundLane {
         // Capture locals for the RT block — pointers only, never `self`.
         let data = sink.data, cap = sink.frameCapacity
         let wIdx = sink.writeIndex, rIdx = sink.readIndex
-        let gp = gainPtr, mL = meterL, mR = meterR
+        smoothPtr.pointee = gainPtr.pointee          // start matched: no ramp on (re)start
+        let gp = gainPtr, sp = smoothPtr, mL = meterL, mR = meterR
 
         var proc: AudioDeviceIOProcID?
         let ps = AudioDeviceCreateIOProcIDWithBlock(&proc, agg, nil) { (_, inInputData, _, _, _) in
@@ -119,7 +123,8 @@ public final class MacSoundLane: SoundLane {
             guard chans > 0, let mData = buf.mData else { return }
             let frames = Int(buf.mDataByteSize) / (MemoryLayout<Float>.size * chans)   // interleaved float
             let src = mData.assumingMemoryBound(to: Float.self)
-            let gain = gp.pointee
+            let target = gp.pointee
+            var g = sp.pointee                       // smoothed gain, ramped per sample
 
             // Free space in the lane buffer; drop on full (reader priority). Meter every
             // captured frame *post-gain* (so the fader and mute move the VU) regardless of
@@ -130,8 +135,10 @@ public final class MacSoundLane: SoundLane {
             var lpk = mL.pointee, rpk = mR.pointee
             var i = 0
             while i < frames {
-                let l  = src[i * chans + 0] * gain
-                let rr = (chans > 1 ? src[i * chans + 1] : src[i * chans + 0]) * gain
+                g += gainSmoothingAlpha * (target - g)             // de-zipper: no gain step
+                if abs(target - g) < 1e-6 { g = target }           // settle exactly (no denormals)
+                let l  = src[i * chans + 0] * g
+                let rr = (chans > 1 ? src[i * chans + 1] : src[i * chans + 0]) * g
                 let al = l < 0 ? -l : l; if al > lpk { lpk = al }   // meter post-gain
                 let ar = rr < 0 ? -rr : rr; if ar > rpk { rpk = ar }
                 if UInt64(i) < give {
@@ -140,6 +147,7 @@ public final class MacSoundLane: SoundLane {
                 }
                 i &+= 1
             }
+            sp.pointee = g
             mL.pointee = lpk; mR.pointee = rpk
             OSMemoryBarrier()
             wIdx.pointee = w &+ give
