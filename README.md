@@ -103,13 +103,23 @@ LoopbackDriver  (standalone; loaded by coreaudiod, addressed by MixEngine/Driver
 Requires [Mint](https://github.com/yonaskolb/Mint) + XcodeGen (pinned in `Mintfile`).
 
 **Set your Apple Developer Team ID first.** Every module signs against the
-`DEVELOPMENT_TEAM` environment variable (XcodeGen substitutes it into each
-`project.yml` at generation time). `make generate` **refuses to run** with an
-empty team, so projects are never emitted with a blank signing identity:
+`DEVELOPMENT_TEAM` environment variable (and `BUNDLE_IDENTIFIER`, which defaults
+to `ca.borisvanin.soundboard`); XcodeGen substitutes both into each `project.yml`
+at generation time. `make generate` **refuses to run** with an empty team, so
+projects are never emitted with a blank signing identity.
+
+These build vars are loaded from a gitignored `.envrc` via
+[direnv](https://direnv.net), so every `make` invocation shares one source of truth.
+Install direnv (`brew install direnv`, then add the shell hook, e.g.
+`eval "$(direnv hook zsh)"` in `~/.zshrc`), then:
 
 ```sh
-export DEVELOPMENT_TEAM=ABCDE12345   # Xcode ▸ Settings ▸ Accounts ▸ your team ▸ Team ID
+cp .envrc.default .envrc   # then edit: set DEVELOPMENT_TEAM (Xcode ▸ Settings ▸ Accounts ▸ Team ID)
+direnv allow               # one-time approval; direnv auto-loads .envrc on cd from now on
 ```
+
+(Not using direnv? Just `export DEVELOPMENT_TEAM=ABCDE12345` in your shell instead
+— `.envrc` is a plain `export` script, so `source .envrc` also works as a fallback.)
 
 You need a team because the loopback driver loads out-of-process in `coreaudiod`
 and must be code-signed (and notarized for distribution). Then:
@@ -119,13 +129,53 @@ make              # bootstrap Mint, then generate every module's .xcodeproj + th
 make open         # open Soundboard.xcworkspace
 make scratch      # clean + regenerate + open
 make install-driver   # build, sign, and install the loopback driver (sudo; restarts coreaudiod)
-make installer    # build a double-clickable .pkg (app → /Applications, driver → HAL)
+make installer    # build a signed double-clickable .pkg into dist/ (app → /Applications, driver → HAL)
 make test         # unit tests for the driver's shared-memory ring + protocol
 make tools        # build the dev CLI tools (soundboardctl, tap_feed, make_icon) into dist/
 ```
 
 Frameworks are generated before their consumers (projectReferences need the
 referenced `.xcodeproj` on disk). Order is encoded in the `Makefile`.
+
+## Codesigning
+
+Every target uses **manual signing** (`CODE_SIGN_STYLE: Manual` in each
+`project.yml`), and Xcode picks the certificate per build configuration:
+
+| Configuration | `CODE_SIGN_IDENTITY` | Used for |
+|---------------|----------------------|----------|
+| **Debug**     | `Apple Development`   | local build + run in Xcode |
+| **Release**   | `Developer ID Application` | the distributable `.app` + loopback driver |
+
+Because the app bundles a CoreAudio HAL driver it ships **Developer ID** (direct
+distribution + notarization) — it cannot go through the Mac App Store. The two
+identities you need in your keychain:
+
+- **Developer ID Application** — signs the Release `.app` and the loopback driver
+- **Developer ID Installer** — signs the distributable `.pkg`
+
+Get them from the [Apple Developer portal](https://developer.apple.com/account/resources/certificates)
+(Certificates ▸ +) or via Xcode ▸ Settings ▸ Accounts ▸ Manage Certificates, then
+verify they're installed:
+
+```sh
+security find-identity -v -p codesigning     # should list both Developer ID certs + Apple Development
+```
+
+`make installer` (→ `installer/build-pkg.sh`) builds Release, signs the `.app` +
+driver with **Developer ID Application** (hardened runtime + secure timestamp),
+signs the `.pkg` with **Developer ID Installer**, and writes it to `dist/`. The
+identities default to a prefix match against the single Developer ID certs in your
+keychain; if you have more than one, override them:
+
+```sh
+APP_SIGN_ID="Developer ID Application: NAME (TEAMID)" \
+  INSTALLER_SIGN_ID="Developer ID Installer: NAME (TEAMID)" \
+  make installer
+```
+
+To distribute to other Macs, notarize + staple the finished `.pkg` — see the
+NOTARIZATION note at the bottom of `installer/build-pkg.sh`.
 
 ## Apple constraints baked into this design
 
@@ -156,8 +206,9 @@ Contributions are welcome. To get a clean build going:
    these green and add coverage for protocol or ring changes.
 
 Notes:
-- The repo tracks **only sources** — generated `.xcodeproj`/`.xcworkspace`, `dist/`,
-  `installer/dist/`, and `.bin/` are git-ignored and recreated by `make`.
+- The repo tracks **only sources** — generated `.xcodeproj`/`.xcworkspace`, `dist/`
+  (build artifacts + the installer `.pkg`), and `.bin/` are git-ignored and recreated
+  by `make`.
 - Architecture lives in `docs/protocol.md` and `LoopbackDriver/SHMEM.md`; read the
   shmem-ring contract before touching the driver↔app boundary.
 - Driver/HAL changes need `make install-driver` (sudo; restarts `coreaudiod`) to

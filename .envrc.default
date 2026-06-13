@@ -1,0 +1,16 @@
+# Template for direnv — the SINGLE source of truth for every build & signing var.
+#
+# Copy to .envrc, then fill in EVERY value below yourself: nothing is pre-filled.
+# Whoever builds the app supplies their own Apple Team ID and bundle-ID prefix.
+# Then run `direnv allow` once; direnv auto-loads .envrc on cd from then on.
+# .envrc is gitignored, so your values stay local.
+#
+# IMPORTANT: keep `export` on every line. direnv only picks up EXPORTED variables,
+# and make reads them from the environment — a bare `FOO=bar` (no export) is
+# shell-local and will NOT be seen. Re-run `direnv allow` after every edit.
+
+# --- Apple Developer Team ID (Xcode > Settings > Accounts > Team ID) ---
+export DEVELOPMENT_TEAM=
+
+# --- Bundle-ID prefix shared by every module (e.g. com.<your-team>.soundboard) ---
+export BUNDLE_IDENTIFIER=
