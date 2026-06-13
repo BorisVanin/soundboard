@@ -12,6 +12,14 @@ settings:
     SWIFT_APPROACHABLE_CONCURRENCY: YES
     SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
     SUPPORTED_PLATFORMS: "macosx"
+    # Project-level signing + Xcode "Validate Project Settings" recommendations,
+    # inherited by every target (so no per-target DEVELOPMENT_TEAM).
+    DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+    DEAD_CODE_STRIPPING: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    ENABLE_MODULE_VERIFIER: YES
+    MODULE_VERIFIER_SUPPORTED_LANGUAGES: "objective-c objective-c++"
+    MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS: "gnu11 gnu++17"
 
 projectReferences:
   MixerModel:
@@ -59,19 +67,25 @@ targets:
         # CFBundleName/executable to Soundboard (what Finder, the installer, and
         # System Settings ▸ Accessibility display).
         PRODUCT_NAME: Soundboard
-        PRODUCT_BUNDLE_IDENTIFIER: ca.borisvanin.soundboard.app
+        PRODUCT_BUNDLE_IDENTIFIER: ${BUNDLE_IDENTIFIER}.app
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"
-        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
-        CODE_SIGN_STYLE: Automatic
+        # Manual signing: Debug = Apple Development, Release = Developer ID
+        # Application (per-config CODE_SIGN_IDENTITY below). Xcode signs the app
+        # + its embedded frameworks at build time; installer/build-pkg.sh only
+        # signs the .pkg itself with Developer ID Installer.
+        CODE_SIGN_STYLE: Manual
+        PROVISIONING_PROFILE_SPECIFIER: ""
         ENABLE_PREVIEWS: YES
         ENABLE_HARDENED_RUNTIME: YES
       configs:
         Debug:
+          CODE_SIGN_IDENTITY: "Apple Development"
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG $(inherited)"
           SWIFT_OPTIMIZATION_LEVEL: "-Onone"
         Release:
+          CODE_SIGN_IDENTITY: "Developer ID Application"
           SWIFT_COMPILATION_MODE: wholemodule
 
 # A shared scheme so `xcodebuild -workspace … -scheme SoundboardApp` works from the

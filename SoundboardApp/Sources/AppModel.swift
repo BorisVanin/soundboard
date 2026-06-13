@@ -268,7 +268,7 @@ final class AppModel {
             forName: Notification.Name("ca.borisvanin.soundboard.cmd"),
             object: nil, queue: .main) { [weak self] note in
             let cmd = note.object as? String
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self, let cmd else { return }
                 self.handleRemoteCommand(cmd)
             }

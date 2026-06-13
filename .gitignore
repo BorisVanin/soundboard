@@ -4,10 +4,14 @@ build
 .build
 *.xcworkspace
 installer/.stage
-installer/dist
+installer/.build
 example
 dist
 .DS_Store
 .claude
 *.pkg
 docs/github-repo-setup.md
+
+# Local build/signing vars (direnv) — keep out of git
+.env
+.envrc

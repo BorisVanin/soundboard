@@ -9,26 +9,21 @@ MODULES_APP   = LoopbackDriver SoundboardApp
 MODULES       = $(MODULES_LIB) $(MODULES_APP)
 WORKSPACE     = Soundboard.xcworkspace
 
+# Bundle-ID prefix shared by every module: each project.yml resolves
+# ${BUNDLE_IDENTIFIER} from the environment at generation time (XcodeGen
+# substitution) and appends its own suffix (e.g. ${BUNDLE_IDENTIFIER}.engine).
+# Defaults to the project's id but is overridable (fork / different account):
+#   make BUNDLE_IDENTIFIER=com.acme.soundboard   (or export it)
+BUNDLE_IDENTIFIER ?= ca.borisvanin.soundboard
+export BUNDLE_IDENTIFIER
+
 all: mint_bootstrap generate generate_workspace
 
 mint_bootstrap:
 	MINT_LINK_PATH=.bin mint bootstrap --link
 
-# Every project.yml resolves DEVELOPMENT_TEAM from the environment at generation
-# time (XcodeGen ${VAR} substitution). Refuse to generate with an empty team so
-# we never emit projects with a broken/blank signing identity — set your Apple
-# Developer Team ID first, e.g. `export DEVELOPMENT_TEAM=ABCDE12345`.
-require_team:
-	@if [ -z "$$DEVELOPMENT_TEAM" ]; then \
-		echo "error: DEVELOPMENT_TEAM is not set."; \
-		echo "       Set your Apple Developer Team ID before generating, e.g.:"; \
-		echo "         export DEVELOPMENT_TEAM=ABCDE12345"; \
-		echo "       (Xcode ▸ Settings ▸ Accounts ▸ your team ▸ Team ID.)"; \
-		exit 1; \
-	fi
-
 # Order matters: model first, then taps/engine/midi, then driver + app.
-generate: require_team
+generate:
 	@for m in $(MODULES); do \
 		echo "==> xcodegen $$m"; \
 		( cd $$m && MINT_LINK_PATH=../.bin mint run xcodegen ) || exit 1; \
@@ -67,8 +62,9 @@ uninstall-driver:
 reload-coreaudio:
 	sudo killall coreaudiod
 
-# Build a double-clickable .pkg (app → /Applications, driver → HAL, restarts
-# coreaudiod). Local/ad-hoc signed; override the version with PKG_VERSION=x.y.
+# Build a double-clickable .pkg into dist/ (app → /Applications, driver → HAL,
+# restarts coreaudiod). Signed with Developer ID Application (app + driver) and
+# Developer ID Installer (.pkg). Override the version with PKG_VERSION=x.y.
 PKG_VERSION ?= 1.0
 installer: chmod_installer
 	VERSION=$(PKG_VERSION) installer/build-pkg.sh
@@ -76,7 +72,7 @@ installer: chmod_installer
 chmod_installer:
 	@chmod +x installer/build-pkg.sh installer/scripts/postinstall
 
-.PHONY: all mint_bootstrap require_team generate generate_workspace clean open scratch \
+.PHONY: all mint_bootstrap generate generate_workspace clean open scratch \
         install-driver uninstall-driver reload-coreaudio installer chmod_installer \
         test tools
 
