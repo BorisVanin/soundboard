@@ -1,17 +1,32 @@
+# XcodeGen generates these from project.yml — never commit them
 *.xcodeproj
-.bin
+*.xcworkspace
+
+# Xcode / build artifacts
+DerivedData/
 build
 .build
-*.xcworkspace
-installer/.stage
-installer/.build
-example
-dist
+*.xcuserstate
+xcuserdata/
 .DS_Store
-.claude
+.bin
+
+# Distribution artifacts (xcodegen-templates/scripts write finished .pkg/.dmg
+# here; intermediate archives/exports go to a temp work dir).
+dist
 *.pkg
+*.dmg
+
+# Tooling / local
+.claude
+example
 docs/github-repo-setup.md
 
-# Local build/signing vars (direnv) — keep out of git
+# Local build/signing vars (direnv) — keep out of git.
+# Copy .envrc.default -> .envrc and `direnv allow`.
 .env
 .envrc
+
+# Vendored copy of the templates (fetched by `mise run templates`, .git-free).
+# Version.xcconfig is NOT ignored — it is the committed version source of truth.
+xcodegen-templates/

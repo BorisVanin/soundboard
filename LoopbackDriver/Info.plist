@@ -1,23 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  PARTIAL Info.plist.
+
+  GENERATE_INFOPLIST_FILE: YES (from the BuildNumber template) synthesizes the
+  standard bundle keys (CFBundleIdentifier, CFBundleExecutable, CFBundleName,
+  CFBundlePackageType, CFBundleShortVersionString/Version, …) from build settings
+  and merges them on top of these keys. So this file carries ONLY what cannot be
+  expressed as INFOPLIST_KEY_* build settings: the nested CFPlugIn dictionaries
+  the HAL needs to discover and instantiate the AudioServerPlugIn factory.
+  See xcodegen-templates/docs/SETTINGS.md (GENERATE_INFOPLIST_FILE).
+-->
 <plist version="1.0">
 <dict>
-	<key>CFBundleDevelopmentRegion</key>
-	<string>$(DEVELOPMENT_LANGUAGE)</string>
-	<key>CFBundleExecutable</key>
-	<string>$(EXECUTABLE_NAME)</string>
-	<key>CFBundleIdentifier</key>
-	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-	<key>CFBundleInfoDictionaryVersion</key>
-	<string>6.0</string>
-	<key>CFBundleName</key>
-	<string>$(PRODUCT_NAME)</string>
-	<key>CFBundlePackageType</key>
-	<string>BNDL</string>
-	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
-	<key>CFBundleVersion</key>
-	<string>1</string>
 	<key>CFPlugInFactories</key>
 	<dict>
 		<!-- factory UUID -> C factory function name -->

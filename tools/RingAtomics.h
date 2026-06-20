@@ -1,6 +1,6 @@
 // Tiny C shim so Swift can do correct acquire/release atomics on the shared
 // ring indices (Swift can't call __atomic builtins directly). Throwaway, paired
-// with tap_feed.swift. Layout matches LoopbackDriver/Sources/SoundboardRing.h.
+// with tap_feed.swift. Layout matches LoopbackDriver/src/SoundboardRing.h.
 #pragma once
 #include <stdint.h>
 #include <sys/mman.h>

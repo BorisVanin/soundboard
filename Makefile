@@ -1,37 +1,60 @@
-# Soundboard — multi-module build.
+# Soundboard — developer tasks.
 #
-# Every module is a standalone XcodeGen project. Frameworks are generated
-# before the consumers that reference them (projectReferences need the
-# referenced .xcodeproj to exist on disk at generation time).
+# Built on xcodegen-templates (vendored at ./xcodegen-templates via `mise run
+# templates`). Every module is a standalone XcodeGen project whose project.yml
+# `include:`s the templates by env-var path (${TEMPLATES_HOME}/…), so
+# PROJECT_HOME / TEMPLATES_HOME / DEVELOPMENT_TEAM must be in the environment
+# (loaded from .envrc via direnv — see .envrc.default). Toolchain (xcodegen,
+# swiftlint) is pinned in mise.toml and invoked via `mise exec`.
+#
+# Distribution (pkg / dmg / dist) reuses the templates' shared scripts under
+# xcodegen-templates/scripts — see docs in xcodegen-templates/docs/DISTRIBUTION.md.
 
+# Frameworks are generated before the consumers that reference them
+# (projectReferences need the referenced .xcodeproj on disk at generation time):
+# model first, then engine/midi/driver-control, then the HAL driver + the app.
 MODULES_LIB   = MixerModel MixerEngine MIDISurface DriverControl
 MODULES_APP   = LoopbackDriver SoundboardApp
 MODULES       = $(MODULES_LIB) $(MODULES_APP)
 WORKSPACE     = Soundboard.xcworkspace
+SCHEME        = Soundboard
+DESTINATION   = platform=macOS
 
 # Bundle-ID prefix shared by every module: each project.yml resolves
-# ${BUNDLE_IDENTIFIER} from the environment at generation time (XcodeGen
-# substitution) and appends its own suffix (e.g. ${BUNDLE_IDENTIFIER}.engine).
-# Defaults to the project's id but is overridable (fork / different account):
-#   make BUNDLE_IDENTIFIER=com.acme.soundboard   (or export it)
-BUNDLE_IDENTIFIER ?= ca.borisvanin.soundboard
-export BUNDLE_IDENTIFIER
+# ${PROJECT_IDENTIFIER} from the environment at generation time and appends its
+# own suffix (e.g. ${PROJECT_IDENTIFIER}.engine). Defaults to the project's id but
+# is overridable (fork / different account):
+#   make PROJECT_IDENTIFIER=com.acme.soundboard   (or export it via .envrc)
+PROJECT_IDENTIFIER ?= ca.borisvanin.soundboard
+export PROJECT_IDENTIFIER
 
-all: mint_bootstrap generate generate_workspace
+# ── Distribution wiring (consumed by xcodegen-templates/scripts) ─────────────
+# The shared scripts read project specifics from the environment; machine
+# identity / notary creds come from .envrc. The scheme is "Soundboard" so the
+# built bundle is Soundboard.app and artifacts are named Soundboard-<version>.
+# PKG_SCRIPTS_DIR points the .pkg at our postinstall (installs the embedded HAL
+# driver into /Library/Audio/Plug-Ins/HAL + restarts coreaudiod).
+SCRIPTS := $(abspath xcodegen-templates/scripts)
+export APP_PROJECT     := $(abspath SoundboardApp/SoundboardApp.xcodeproj)
+export APP_SCHEME      := $(SCHEME)
+export PKG_IDENTIFIER  := $(PROJECT_IDENTIFIER).pkg
+export PKG_SCRIPTS_DIR := $(abspath pkg-scripts)
 
-mint_bootstrap:
-	MINT_LINK_PATH=.bin mint bootstrap --link
+.PHONY: all gen generate_workspace debug release open clean scratch \
+        pkg dmg dist test tools
 
-# Order matters: model first, then taps/engine/midi, then driver + app.
-generate:
+all: gen
+
+# ── Generate ─────────────────────────────────────────────────────────────────
+# Regenerate every module's .xcodeproj (in dependency order) and the workspace
+# that stitches them together. The generated projects are disposable + git-ignored.
+gen: generate_workspace
+
+generate_workspace:
 	@for m in $(MODULES); do \
 		echo "==> xcodegen $$m"; \
-		( cd $$m && MINT_LINK_PATH=../.bin mint run xcodegen ) || exit 1; \
+		( cd $$m && mise exec -- xcodegen generate ) || exit 1; \
 	done
-
-# The workspace stitches the per-module projects together. XcodeGen here only
-# emits per-module projects, so we generate the workspace ourselves from MODULES.
-generate_workspace:
 	@mkdir -p "$(WORKSPACE)"
 	@printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<Workspace version = "1.0">' > "$(WORKSPACE)/contents.xcworkspacedata"
 	@for m in $(MODULES); do \
@@ -40,42 +63,44 @@ generate_workspace:
 	@printf '%s\n' '</Workspace>' >> "$(WORKSPACE)/contents.xcworkspacedata"
 	@echo "==> wrote $(WORKSPACE)"
 
-clean:
-	@for m in $(MODULES); do \
-		rm -rf "$$m/$$m.xcodeproj"; \
-	done
-	@rm -rf "$(WORKSPACE)"
+# ── Build ────────────────────────────────────────────────────────────────────
+debug: gen
+	xcodebuild -project $(APP_PROJECT) -scheme $(SCHEME) \
+		-configuration Debug -destination '$(DESTINATION)' build
 
-open:
+release: gen
+	xcodebuild -project $(APP_PROJECT) -scheme $(SCHEME) \
+		-configuration Release -destination '$(DESTINATION)' build
+
+open: gen
 	open "$(WORKSPACE)"
+
+clean:
+	@for m in $(MODULES); do rm -rf "$$m/$$m.xcodeproj"; done
+	@rm -rf "$(WORKSPACE)"
 
 scratch: clean all open
 
-# Driver install lifecycle (copies into /Library/Audio/Plug-Ins/HAL, signs,
-# fixes ownership, restarts coreaudiod). Prompts for sudo.
-install-driver:
-	cd LoopbackDriver && ./install.sh
+# ── Distribution (Developer ID, notarized) ───────────────────────────────────
+# Each target regenerates the projects, builds a distribution-signed artifact via
+# the shared scripts, and notarizes + staples it. The app's Developer ID export
+# also re-signs the embedded HAL driver; the .pkg postinstall lays it into
+# /Library/Audio/Plug-Ins/HAL on the target Mac. Needs DEVELOPMENT_TEAM +
+# NOTARY_PROFILE in .envrc and Developer ID Application/Installer certs in your
+# keychain. See xcodegen-templates/docs/DISTRIBUTION.md.
 
-uninstall-driver:
-	cd LoopbackDriver && ./install.sh uninstall
+# Notarized .pkg installer (app → /Applications, driver → HAL via postinstall).
+pkg: gen
+	$(SCRIPTS)/notarize.sh "$$($(SCRIPTS)/build-pkg.sh)"
 
-reload-coreaudio:
-	sudo killall coreaudiod
+# Notarized .dmg disk image (drag the app to Applications; driver not installed).
+dmg: gen
+	$(SCRIPTS)/notarize.sh "$$($(SCRIPTS)/build-dmg.sh)"
 
-# Build a double-clickable .pkg into dist/ (app → /Applications, driver → HAL,
-# restarts coreaudiod). Signed with Developer ID Application (app + driver) and
-# Developer ID Installer (.pkg). Override the version with PKG_VERSION=x.y.
-PKG_VERSION ?= 1.0
-installer: chmod_installer
-	VERSION=$(PKG_VERSION) installer/build-pkg.sh
+# Both distribution artifacts.
+dist: pkg dmg
 
-chmod_installer:
-	@chmod +x installer/build-pkg.sh installer/scripts/postinstall
-
-.PHONY: all mint_bootstrap generate generate_workspace clean open scratch \
-        install-driver uninstall-driver reload-coreaudio installer chmod_installer \
-        test tools
-
+# ── Project-specific dev tasks ───────────────────────────────────────────────
 # Unit tests for the driver's shared-memory ring + protocol (RingOwner/RingClient).
 # Pure in-process logic + real POSIX shm — no coreaudiod, no HAL, no install.
 test:

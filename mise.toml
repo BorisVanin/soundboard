@@ -1,0 +1,27 @@
+# Toolchain + template vendoring for this project.
+#
+# NOTE: this example lives *inside* the xcodegen-templates repo, so its .envrc
+# points TEMPLATES_HOME at the repo root (../..) and you do NOT need to run
+# `mise run templates` here. In a real project, copy the [tasks.templates] block
+# below, run `mise run templates`, and point TEMPLATES_HOME at ./xcodegen-templates
+# (see .envrc-example).
+
+[tools]
+xcodegen = "2.45.4"
+swiftlint = "0.63.3"
+
+[env]
+# Pin to a released tag for reproducible builds (e.g. "v1.0.0").
+# "main" tracks the latest until you pin a tag.
+TEMPLATES_REF = "main"
+
+[tasks.templates]
+description = "Vendor a pinned copy of xcodegen-templates into ./xcodegen-templates"
+run = """
+set -euo pipefail
+DEST="${MISE_PROJECT_ROOT:-$PWD}/xcodegen-templates"
+rm -rf "$DEST"
+git clone --depth 1 --branch "$TEMPLATES_REF" https://github.com/BorisVanin/xcodegen-templates.git "$DEST"
+rm -rf "$DEST/.git"
+echo "Vendored xcodegen-templates@$TEMPLATES_REF -> $DEST"
+"""

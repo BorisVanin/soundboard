@@ -1,0 +1,10 @@
+// Version source of truth (committed), shared by every module via the templates'
+// BuildNumber / BuildNumberAutoIncrement target templates.
+//
+//   VERSION       -> MARKETING_VERSION         (CFBundleShortVersionString)
+//   BUILD_NUMBER  -> CURRENT_PROJECT_VERSION   (CFBundleVersion)
+//
+// SoundboardApp uses BuildNumberAutoIncrement, which bumps BUILD_NUMBER (+1) on
+// every Debug build. The frameworks + driver use BuildNumber (static read).
+VERSION = 1.0.1
+BUILD_NUMBER = 12
