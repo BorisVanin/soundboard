@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Build + run the headless engine harness: links ALL of MixerEngine/Sources with
+# Build + run the headless engine harness: links ALL of MixerEngine/src with
 # tests/engine_harness/main.swift into one CLI binary, so it drives the real
 # MixEngine / MacSoundLane / MicSoundLane capture code without the GUI app.
 #
@@ -16,7 +16,7 @@ BIN="$OUT/engine_harness"
 mkdir -p "$OUT"
 set -e
 swiftc -O \
-    "$ROOT"/MixerEngine/Sources/*.swift \
+    "$ROOT"/MixerEngine/src/*.swift \
     "$DIR"/engine_harness/main.swift \
     -framework CoreAudio -framework AudioToolbox -framework Accelerate \
     -framework AVFAudio -framework AppKit -framework Foundation \

@@ -19,7 +19,7 @@ import Foundation
 import CoreAudio
 import AudioToolbox
 
-// ---- Ring contract (mirrors LoopbackDriver/Sources/SoundboardRing.h) ----
+// ---- Ring contract (mirrors LoopbackDriver/src/SoundboardRing.h) ----
 let kRingShmName      = "/soundboard_mix_ring"
 let kRingMagic: UInt32 = 0x53424752          // 'SBGR'
 let kRingChannels      = 2

@@ -1,0 +1,33 @@
+#!/bin/bash
+#
+# pkg postinstall — runs as ROOT after the payload is laid down.
+#
+# The template's build-pkg.sh stages only the app (Soundboard.app -> /Applications).
+# Soundboard also ships a HAL AudioServerPlugIn, embedded inside the app bundle at
+#   Contents/Library/Audio/Plug-Ins/HAL/SoundboardDriver.driver
+# (signed as part of the app's Developer ID export). coreaudiod loads HAL plug-ins
+# ONLY from /Library/Audio/Plug-Ins/HAL, validates their signature, and keeps the
+# old copy in memory until restarted — so install the driver out of the app bundle
+# into the HAL directory, fix ownership/permissions, and restart coreaudiod.
+#
+# A non-zero exit FAILS the whole install, so each step is deliberate. Absolute
+# paths only (root runs with a minimal environment). See docs/DISTRIBUTION.md in
+# xcodegen-templates for the PKG_SCRIPTS_DIR contract.
+set -e
+
+APP="/Applications/Soundboard.app"
+DRIVER_NAME="SoundboardDriver.driver"
+EMBEDDED="${APP}/Contents/Library/Audio/Plug-Ins/HAL/${DRIVER_NAME}"
+HAL_DIR="/Library/Audio/Plug-Ins/HAL"
+
+if [[ -d "$EMBEDDED" ]]; then
+    /bin/mkdir -p "$HAL_DIR"
+    /bin/rm -rf "${HAL_DIR}/${DRIVER_NAME}"
+    /bin/cp -R "$EMBEDDED" "${HAL_DIR}/"
+    /usr/sbin/chown -R root:wheel "${HAL_DIR}/${DRIVER_NAME}"
+    /bin/chmod -R 755 "${HAL_DIR}/${DRIVER_NAME}"
+    # coreaudiod caches loaded plug-ins; restart it to pick up the new driver.
+    /usr/bin/killall coreaudiod 2>/dev/null || true
+fi
+
+exit 0

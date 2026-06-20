@@ -4,7 +4,7 @@
 # No coreaudiod, no HAL, no install — pure in-process logic + real POSIX shm.
 #
 DIR="$(cd "$(dirname "$0")" && pwd)"
-SRC="$DIR/../LoopbackDriver/Sources"
+SRC="$DIR/../LoopbackDriver/src"
 OUT="$DIR/../dist"
 BIN="$OUT/ring_tests"
 PROF="$OUT/ring_tests.profraw"

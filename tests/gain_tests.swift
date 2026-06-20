@@ -6,7 +6,7 @@
 //
 //  Root cause under test: `MacSoundLane`/`MicSoundLane` apply gain block-wise —
 //  the IOProc reads the lane gain ONCE per buffer and multiplies every frame by
-//  that single held value (see MixerEngine/Sources/MacSoundLane.swift:122-134 and
+//  that single held value (see MixerEngine/src/MacSoundLane.swift:122-134 and
 //  MicSoundLane.swift:174-200). There is NO per-sample smoothing. While the knob
 //  moves, the held value jumps between buffers, so each buffer boundary injects a
 //  step discontinuity into the signal — i.e. zipper noise / clicks.

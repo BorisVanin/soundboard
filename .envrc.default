@@ -1,16 +1,41 @@
 # Template for direnv — the SINGLE source of truth for every build & signing var.
 #
-# Copy to .envrc, then fill in EVERY value below yourself: nothing is pre-filled.
-# Whoever builds the app supplies their own Apple Team ID and bundle-ID prefix.
-# Then run `direnv allow` once; direnv auto-loads .envrc on cd from then on.
+# Copy to .envrc, then fill in EVERY value below yourself: nothing Apple-specific
+# is pre-filled. Whoever builds the app supplies their own Team ID and bundle-ID
+# prefix. Then run `direnv allow` once; direnv auto-loads .envrc on cd from then
+# on, AND in every subdirectory — so each module's xcodegen sees the same vars.
 # .envrc is gitignored, so your values stay local.
 #
 # IMPORTANT: keep `export` on every line. direnv only picks up EXPORTED variables,
 # and make reads them from the environment — a bare `FOO=bar` (no export) is
 # shell-local and will NOT be seen. Re-run `direnv allow` after every edit.
 
+# --- xcodegen-templates wiring (consumed by every module's project.yml) -------
+# PROJECT_HOME   — this repo's root, where Version.xcconfig lives. The templates'
+#                  BuildNumber reads ${PROJECT_HOME}/Version.xcconfig.
+# TEMPLATES_HOME — the vendored xcodegen-templates checkout (./xcodegen-templates,
+#                  fetched by `mise run templates`). The `include:` paths expand it.
+export PROJECT_HOME="$(pwd)"
+export TEMPLATES_HOME="$(pwd)/xcodegen-templates"
+
 # --- Apple Developer Team ID (Xcode > Settings > Accounts > Team ID) ---
 export DEVELOPMENT_TEAM=
 
 # --- Bundle-ID prefix shared by every module (e.g. com.<your-team>.soundboard) ---
-export BUNDLE_IDENTIFIER=
+# Each module appends its own suffix (e.g. ${PROJECT_IDENTIFIER}.engine).
+export PROJECT_IDENTIFIER=ca.borisvanin.soundboard
+
+# The marketing version (CFBundleShortVersionString) is NOT an env var: it lives
+# in Version.xcconfig (VERSION). The build number (BUILD_NUMBER) lives there too,
+# auto-incremented per Debug build by the BuildNumberAutoIncrement template.
+
+# --- Notarization (only needed for `make pkg` / `make dmg` / `make dist`) ------
+# Either set a keychain profile (recommended), created once with:
+#   xcrun notarytool store-credentials soundboard-notary \
+#     --apple-id you@example.com --team-id $DEVELOPMENT_TEAM --password APP_SPECIFIC_PW
+# export NOTARY_PROFILE=soundboard-notary
+#
+# …or inline an Apple ID + app-specific password (appleid.apple.com, NOT your
+# Apple ID password). Team ID defaults to DEVELOPMENT_TEAM above.
+# export NOTARY_APPLE_ID=you@example.com
+# export NOTARY_PASSWORD=xxxx-xxxx-xxxx-xxxx

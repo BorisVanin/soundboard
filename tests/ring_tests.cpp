@@ -3,9 +3,9 @@
 //  protocol (RingOwner / RingClient). No coreaudiod, no HAL, no install required.
 //
 //  Build & run:  tests/run.sh        (also emits an llvm-cov coverage report)
-//  or:           c++ -std=c++17 -I ../LoopbackDriver/Sources ring_tests.cpp \
-//                    ../LoopbackDriver/Sources/RingOwner.cpp \
-//                    ../LoopbackDriver/Sources/RingClient.cpp -o /tmp/ring_tests && /tmp/ring_tests
+//  or:           c++ -std=c++17 -I ../LoopbackDriver/src ring_tests.cpp \
+//                    ../LoopbackDriver/src/RingOwner.cpp \
+//                    ../LoopbackDriver/src/RingClient.cpp -o /tmp/ring_tests && /tmp/ring_tests
 //
 #include "RingOwner.h"
 #include "RingClient.h"

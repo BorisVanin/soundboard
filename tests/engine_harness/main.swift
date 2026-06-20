@@ -1,7 +1,7 @@
 //
 //  engine_harness — a headless CLI that drives the real MixerEngine code paths
 //  (the same `MixEngine` / `MacSoundLane` / `MicSoundLane` the app uses) without
-//  launching the GUI app. Compiled by linking ALL of MixerEngine/Sources together
+//  launching the GUI app. Compiled by linking ALL of MixerEngine/src together
 //  with this driver, so it exercises the production capture/mix logic directly.
 //
 //  Build/run:  tests/engine_harness.sh <mode> [seconds] [micUID]
@@ -39,7 +39,7 @@ private func drain(_ buffer: LaneBuffer) {
     scratch.deallocate()
 }
 
-private func poll(_ name: String, _ meters: () -> (count: Int, left: Float, right: Float),
+private func poll(_ name: String, _ meters: () -> LaneMeters,
                   seconds: Double, drainTo buffer: LaneBuffer?) {
     say("== \(name): running \(seconds)s — play system audio now ==")
     var peakSeen: Float = 0
