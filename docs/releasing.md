@@ -115,11 +115,19 @@ gh release upload v1.0.0 dist/Soundboard-1.0.0.pkg --repo BorisVanin/soundboard
 sudo installer -pkg Soundboard-1.0.0.pkg -target /
 ```
 
-…or just double-click it in Finder (it prompts for a password). The postinstall
-script installs the embedded HAL driver into `/Library/Audio/Plug-Ins/HAL` and
-restarts `coreaudiod` so it loads immediately. On first run the
-app will request the microphone, audio-capture, and (optionally) accessibility
-permissions described in [architecture.md](architecture.md#apple-constraints-baked-into-this-design).
+…or just double-click it in Finder (it prompts for a password). The install
+scripts handle the lifecycle around an update:
+
+- **preinstall** — if Soundboard is already running, it asks for permission to
+  quit it (declining cancels the install), then quits the old instance so its
+  bundle can be replaced cleanly.
+- **postinstall** — installs the embedded HAL driver into
+  `/Library/Audio/Plug-Ins/HAL` and restarts `coreaudiod` so it loads
+  immediately; if the app had been running, it relaunches the new version.
+
+On first run the app will request the microphone, audio-capture, and (optionally)
+accessibility permissions described in
+[architecture.md](architecture.md#apple-constraints-baked-into-this-design).
 
 ## GitHub repo settings checklist
 

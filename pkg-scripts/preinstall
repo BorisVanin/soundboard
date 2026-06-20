@@ -1,0 +1,56 @@
+#!/bin/bash
+#
+# pkg preinstall — runs as ROOT before the new payload is written.
+#
+# If Soundboard is currently running, its bundle is about to be replaced. Ask the
+# user (in their GUI session) for permission to quit it first; declining CANCELS
+# the install (non-zero exit). If they accept, quit it gracefully (force as a last
+# resort) and leave a flag so postinstall relaunches the new version.
+#
+# Scripts run as root in a minimal environment, so GUI work (the dialog, the quit,
+# the later relaunch) is dispatched into the console user's session via
+# `launchctl asuser <uid> sudo -u <user> …`. Absolute paths throughout.
+set -e
+
+APP_NAME="Soundboard"
+FLAG="/private/tmp/.soundboard-installer-relaunch"
+/bin/rm -f "$FLAG"
+
+# Nothing to do if Soundboard isn't running.
+/usr/bin/pgrep -x "$APP_NAME" >/dev/null 2>&1 || exit 0
+
+consoleUser="$(/usr/bin/stat -f%Su /dev/console 2>/dev/null || true)"
+
+# Run a command inside the console user's GUI session.
+asUser() {
+    local uid
+    uid="$(/usr/bin/id -u "$consoleUser" 2>/dev/null)" || return 1
+    /bin/launchctl asuser "$uid" /usr/bin/sudo -u "$consoleUser" "$@"
+}
+
+if [ -n "$consoleUser" ] && [ "$consoleUser" != "root" ]; then
+    # Ask permission. Cancel (or any dialog failure) aborts the install.
+    if ! asUser /usr/bin/osascript -e \
+        'display dialog "Soundboard is open and must quit to finish updating. Quit Soundboard and continue?" buttons {"Cancel", "Quit & Update"} default button "Quit & Update" with title "Soundboard Installer" with icon caution' \
+        >/dev/null 2>&1; then
+        echo "update cancelled by user: Soundboard left running" >&2
+        exit 1
+    fi
+
+    # Quit gracefully, then force if it lingers (up to ~10s).
+    asUser /usr/bin/osascript -e "tell application \"$APP_NAME\" to quit" >/dev/null 2>&1 || true
+    n=0
+    while /usr/bin/pgrep -x "$APP_NAME" >/dev/null 2>&1 && [ "$n" -lt 20 ]; do
+        /bin/sleep 0.5
+        n=$((n + 1))
+    done
+    /usr/bin/pkill -x "$APP_NAME" 2>/dev/null || true
+
+    # Tell postinstall to relaunch the new version as this user.
+    /bin/echo "$consoleUser" > "$FLAG"
+else
+    # No GUI session to prompt; best-effort quit, no relaunch.
+    /usr/bin/pkill -x "$APP_NAME" 2>/dev/null || true
+fi
+
+exit 0
