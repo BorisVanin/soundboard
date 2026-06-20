@@ -30,4 +30,17 @@ if [[ -d "$EMBEDDED" ]]; then
     /usr/bin/killall coreaudiod 2>/dev/null || true
 fi
 
+# If preinstall quit a running instance, relaunch the new version as that user
+# (in their GUI session). Best-effort: never fail the install on a relaunch error.
+FLAG="/private/tmp/.soundboard-installer-relaunch"
+if [[ -f "$FLAG" ]]; then
+    relaunchUser="$(/bin/cat "$FLAG" 2>/dev/null || true)"
+    /bin/rm -f "$FLAG"
+    if [[ -n "$relaunchUser" && "$relaunchUser" != "root" ]]; then
+        uid="$(/usr/bin/id -u "$relaunchUser" 2>/dev/null || true)"
+        [[ -n "$uid" ]] && /bin/launchctl asuser "$uid" /usr/bin/sudo -u "$relaunchUser" \
+            /usr/bin/open "$APP" 2>/dev/null || true
+    fi
+fi
+
 exit 0
