@@ -32,6 +32,7 @@ struct MicLane: View {
                 Spacer(minLength: 0)
                 VolumeStrip(model: model, title: "Mic", systemImage: "mic.fill",
                             levelLine: model.micLevel, muteLine: model.micMute,
+                            monitorLine: model.micMonitor,
                             enabled: model.selectedMonitorMicUID != nil,
                             meterKeyPath: \.micMeter)
                 channelChecklist.disabled(model.assigning).opacity(model.assigning ? 0.4 : 1)

@@ -186,6 +186,8 @@ struct VolumeStrip: View {
     let systemImage: String
     let levelLine: MIDIFader
     let muteLine: MIDIButton
+    /// Optional headphone toggle shown beside the mute (the mic's "fold into monitor").
+    var monitorLine: MIDIButton?
     var enabled: Bool = true
     /// Which meter on the model this strip shows. Passed as a key path (not the
     /// array value) so this view's body does NOT read the meter — only the leaf
@@ -210,13 +212,22 @@ struct VolumeStrip: View {
             .allowsHitTesting(!assigning)
             .overlay { if assigning { AssignLabel(model: model, line: levelLine) } }
             Text("\(Int(level * 100))").font(.caption2).monospacedDigit().foregroundStyle(.secondary)
-            MuteButton(isMuted: muted) { muteLine.isOn.toggle() }
-                .disabled(!enabled)
-                .opacity(enabled ? 1 : 0.35)
-                .allowsHitTesting(!assigning)
-                .overlay { if assigning { AssignLabel(model: model, line: muteLine) } }
+            HStack(spacing: 8) {   // fixed gap between mute and the monitor toggle
+                MuteButton(isMuted: muted) { muteLine.isOn.toggle() }
+                    .disabled(!enabled)
+                    .opacity(enabled ? 1 : 0.35)
+                    .allowsHitTesting(!assigning)
+                    .overlay { if assigning { AssignLabel(model: model, line: muteLine) } }
+                if let monitorLine {
+                    MonitorToggleButton(isOn: monitorLine.isOn) { monitorLine.isOn.toggle() }
+                        .disabled(!enabled)
+                        .opacity(enabled ? 1 : 0.35)
+                        .allowsHitTesting(!assigning)
+                        .overlay { if assigning { AssignLabel(model: model, line: monitorLine) } }
+                }
+            }
         }
-        .frame(width: 66)
+        .frame(width: monitorLine == nil ? 66 : 96)
         .help(enabled ? "" : "This device has no software volume control.")
     }
 }
@@ -333,6 +344,22 @@ private struct MuteButton: View {
         .buttonStyle(.bordered)
         .tint(isMuted ? .red : .accentColor)
         .help(isMuted ? "Unmute" : "Mute")
+    }
+}
+
+/// Headphone toggle: whether the mic is in the monitor mix. Tinted on, dimmed off.
+private struct MonitorToggleButton: View {
+    let isOn: Bool
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Label("Monitor mic", systemImage: "headphones")
+                .labelStyle(.iconOnly)
+                .frame(width: 28, height: 20)
+        }
+        .buttonStyle(.bordered)
+        .tint(isOn ? .accentColor : .secondary)
+        .help(isOn ? "You hear your mic in the monitor." : "Mic excluded from the monitor.")
     }
 }
 

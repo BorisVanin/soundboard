@@ -29,6 +29,7 @@ extension AppModel {
                                monitorEnabled: monitorEnabled,
                                monitorOutputUID: monitorOutputUID,
                                monitorOutputVolume: monitorVolume,
+                               micInMonitor: micMonitor.isOn,
                                mainWindowOpen: mainWindowOpen)
     }
     func saveNow() {

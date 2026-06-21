@@ -6,5 +6,5 @@
 //
 // SoundboardApp uses BuildNumberAutoIncrement, which bumps BUILD_NUMBER (+1) on
 // every Debug build. The frameworks + driver use BuildNumber (static read).
-VERSION = 1.1.0
-BUILD_NUMBER = 26
+VERSION = 1.1.1
+BUILD_NUMBER = 36

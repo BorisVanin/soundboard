@@ -6,6 +6,20 @@
 > this README were authored by the model under human direction. Keep that in mind
 > when reading, reusing, or auditing the code.
 
+## Why?
+
+- **Real knobs.** Plug in a MIDI controller (faders, pads — e.g. an AKAI MPD218)
+  and you get a physical remote for your sound: ride your mic level, balance it
+  against your desktop audio, mute either one instantly — without alt-tabbing or
+  digging through menus.
+- **Be heard.** Bring your computer's audio into a call when you present.
+  Sharing a demo, a tutorial, or a video clip and want people to actually *hear*
+  it, not just see it? Soundboard blends your mic and your desktop audio and
+  feeds the mix into the meeting as a normal microphone.
+
+It's the audio mixing console I reach for every day: full, hands-on control of
+what I hear and what everyone on the call hears, straight from the hardware.
+
 A software + hardware audio mixing console for macOS. A physical MIDI control
 surface (faders/buttons) drives a live mix: the app captures your microphone and
 everything your Mac plays, blends them in software, and feeds the result to a

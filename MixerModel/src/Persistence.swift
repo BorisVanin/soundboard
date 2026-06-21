@@ -48,6 +48,10 @@ public struct PersistedConfig: Codable, Sendable {
     public var monitorOutputUID: String?
     /// Linear 0…1 monitoring volume.
     public var monitorOutputVolume: Float
+    /// Whether the mic lane is folded into the monitor mix. When false the operator's
+    /// own mic is excluded from what plays to the monitor output (the loopback feed and
+    /// recording still get it). Defaults to true.
+    public var micInMonitor: Bool
     /// Whether the main window was open when the app last quit. When false, the app
     /// launches as a menu-bar agent without opening the window.
     public var mainWindowOpen: Bool
@@ -64,6 +68,7 @@ public struct PersistedConfig: Codable, Sendable {
         monitorEnabled: Bool = true,
         monitorOutputUID: String? = nil,
         monitorOutputVolume: Float = 0.5,
+        micInMonitor: Bool = true,
         mainWindowOpen: Bool = true
     ) {
         self.firstOutputUID = firstOutputUID
@@ -77,6 +82,7 @@ public struct PersistedConfig: Codable, Sendable {
         self.monitorEnabled = monitorEnabled
         self.monitorOutputUID = monitorOutputUID
         self.monitorOutputVolume = monitorOutputVolume
+        self.micInMonitor = micInMonitor
         self.mainWindowOpen = mainWindowOpen
     }
 
@@ -94,6 +100,7 @@ public struct PersistedConfig: Codable, Sendable {
         monitorEnabled = try container.decodeIfPresent(Bool.self, forKey: .monitorEnabled) ?? true
         monitorOutputUID = try container.decodeIfPresent(String.self, forKey: .monitorOutputUID)
         monitorOutputVolume = try container.decodeIfPresent(Float.self, forKey: .monitorOutputVolume) ?? 0.5
+        micInMonitor = try container.decodeIfPresent(Bool.self, forKey: .micInMonitor) ?? true
         mainWindowOpen = try container.decodeIfPresent(Bool.self, forKey: .mainWindowOpen) ?? true
     }
 }

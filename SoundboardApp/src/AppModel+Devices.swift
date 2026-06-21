@@ -105,6 +105,7 @@ extension AppModel {
         let chans = selectedMonitorMicUID.flatMap { monitorChannelSelections[$0] }.map(Array.init) ?? []
         mixEngine.configure(micUID: selectedMonitorMicUID, channels: chans)
         mixEngine.setMicGain(micLevel.rawValue, muted: micMute.isOn)
+        mixEngine.setMicInMonitor(micMonitor.isOn)
         // The Mac lane taps the chosen output device's audio (read-only), independent
         // of the mic — so its VU shows activity whether or not a mic is selected.
         mixEngine.setMacSource(macSourceUID)

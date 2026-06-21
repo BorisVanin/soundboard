@@ -36,6 +36,9 @@ final class AppModel {
     @ObservationIgnored private(set) var micMute: MIDIButton!
     @ObservationIgnored private(set) var macMute: MIDIButton!
     @ObservationIgnored private(set) var micOnOff: MIDIButton!
+    /// Whether the mic is folded into the monitor feed (the operator hears themselves).
+    /// The headphone toggle beside the mic mute; assignable like any other control.
+    @ObservationIgnored private(set) var micMonitor: MIDIButton!
     @ObservationIgnored private(set) var mediaPlayPause: MIDIButton!
     @ObservationIgnored private(set) var mediaNext: MIDIButton!
     @ObservationIgnored private(set) var mediaPrev: MIDIButton!
@@ -55,6 +58,7 @@ final class AppModel {
         static let mediaPlayPause: Int32 = 5, mediaNext: Int32 = 6, mediaPrev: Int32 = 7
         static let record: Int32 = 8, monitor: Int32 = 9
         static let monitorLevel: Int32 = 10, monitorMute: Int32 = 11
+        static let micMonitor: Int32 = 12
     }
 
     // MARK: The clutch (single source of truth, req 3)
@@ -219,7 +223,7 @@ final class AppModel {
         buildMicLines(config: config)
         buildMediaLines()
         buildTransportLines(config: config)
-        lines = [micLevel, micMute, micOnOff, macLevel, macMute,
+        lines = [micLevel, micMute, micMonitor, micOnOff, macLevel, macMute,
                  mediaPlayPause, mediaNext, mediaPrev, recordControl,
                  monitorControl, monitorLevel, monitorMute]
     }
@@ -254,6 +258,11 @@ final class AppModel {
                               initialOn: selectedMonitorMicUID != nil) { [weak self] isOn in
             guard let self, self.clutchEngaged else { return }
             self.selectMonitorMic(isOn ? (self.lastMonitorMicUID ?? self.availableInputs.first?.uid) : nil)
+        }
+        micMonitor = MIDIButton(lineID: Line.micMonitor, kind: .toggle,
+                                initialOn: config.micInMonitor) { [weak self] isOn in
+            guard let self, self.clutchEngaged else { return }
+            self.mixEngine.setMicInMonitor(isOn); self.scheduleSave()
         }
     }
 

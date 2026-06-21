@@ -1,3 +1,8 @@
+// swiftlint:disable file_length
+// The ring handshake, capture client, mixer, and HAL helpers all reach the class's
+// private storage, so they live in same-file extensions rather than separate files
+// (splitting would force the internals public). That keeps the file over the length
+// cap by design — the type bodies themselves stay within their limits.
 import Foundation
 import CoreAudio
 import AudioToolbox
@@ -78,6 +83,9 @@ public final class MixEngine {
     // Monitor: plays the finished mix to a user-chosen output device. Fed by the
     // mix tick (a tee of the same buffer written to the shmem ring).
     private let monitor = MixMonitor()
+    // Whether the mic is folded into the monitor feed (read/written on the mix queue).
+    // When false, the monitor is fed the mix *before* the mic is summed in.
+    private var micInMonitor = true
     // Recorder: writes the finished mix to a .wav. Also fed by the mix tick, so the
     // file is byte-identical to the loopback feed and the monitor.
     private let recorder = MixRecorder()
@@ -170,6 +178,12 @@ public final class MixEngine {
     public func setMonitorVolume(_ volume: Float) { monitor.setVolume(volume) }
     public var isMonitoring: Bool { monitor.isRunning }
 
+    /// Whether the mic lane is folded into the monitor feed. When false, the mic is
+    /// excluded from what plays to the monitor output (the operator doesn't hear
+    /// themselves), while the loopback ring and recorder still get the full mix.
+    /// Toggled from the mix queue so `mixTick` sees a consistent value.
+    public func setMicInMonitor(_ included: Bool) { mixQueue.async { self.micInMonitor = included } }
+
     /// Record the finished mix to `url` (a tee of the same buffer fed to the ring +
     /// monitor). Throws if the file can't be created.
     public func startRecording(to url: URL) throws {
@@ -218,8 +232,9 @@ public final class MixEngine {
         }
 
         // Active lanes and how many frames are mixable this tick.
+        let micActive = micLane.isRunning
         var lanes: [LaneBuffer] = []
-        if micLane.isRunning { lanes.append(micBuffer) }
+        if micActive { lanes.append(micBuffer) }
         if captureActive { lanes.append(macBuffer) }
         guard !lanes.isEmpty else { return }
 
@@ -230,34 +245,11 @@ public final class MixEngine {
         for lane in lanes { frameCount = min(frameCount, lane.available) }
         guard frameCount > 0 else { return }
 
-        // Sum the lanes (gain already applied per-lane) via vDSP.
-        vDSP_vclr(scratch, 1, vDSP_Length(frameCount * 2))
-        for lane in lanes { lane.readAdd(into: scratch, frames: frameCount) }
-
-        // Tee the finished mix to the monitor (its own ring; drop-on-full) and the
-        // recorder (async file write). Both no-op when off, independent of the shmem
-        // write below — so they capture the mix even when nothing drains the ring.
-        monitor.enqueue(scratch, frames: frameCount)
-        recorder.write(scratch, frames: frameCount)
-
-        // Write into the shmem ring up to its free space; drop the overflow. The driver
-        // consumer has priority — when nothing drains the ring we simply stop feeding it
-        // (and stop the heartbeat), rather than stalling the lanes/monitor.
-        let shmemFree = Int(frameCapacity - (writeIdx.pointee &- readIdx.pointee))
-        let toShm = min(frameCount, shmemFree)
-        guard toShm > 0 else { return }
-        let cap = Int(frameCapacity)
-        var writePos = writeIdx.pointee
-        var done = 0
-        while done < toShm {
-            let pos = Int(writePos & UInt64(cap - 1))
-            let seg = min(toShm - done, cap - pos)
-            (ringData + pos * 2).update(from: scratch + done * 2, count: seg * 2)
-            writePos &+= UInt64(seg); done += seg
-        }
-        OSMemoryBarrier()
-        writeIdx.pointee = writePos
-        heartbeatPtr.pointee = heartbeatPtr.pointee &+ 1
+        // Sum the lanes + tee to monitor/recorder, then write to the shmem ring. Both
+        // steps live in an extension below to keep this class's body within budget.
+        sumLanesAndTee(micActive: micActive, frameCount: frameCount)
+        writeMixToRing(frames: frameCount, ringData: ringData,
+                       writeIdx: writeIdx, readIdx: readIdx, heartbeatPtr: heartbeatPtr)
     }
 
     /// Sample each active ring's occupancy for the once-a-second log.
@@ -407,7 +399,7 @@ extension MixEngine {
             captureWriteIdx = wIdx; captureReadIdx = rIdx
             captureActive = true
         }
-        logger.info("MixEngine attached capture '\(info.name)' (\(self.captureCapacity) frames) + claimed \(self.captureSession)")
+        logger.info("MixEngine capture '\(info.name)' \(self.captureCapacity)fr, claimed \(self.captureSession)")
     }
 
     private func detachCaptureRing() {
@@ -582,5 +574,51 @@ extension MixEngine {
         _ = withUnsafePointer(to: &cfData) {
             AudioObjectSetPropertyData(dev, &addr, 0, nil, UInt32(MemoryLayout<CFData>.size), $0)
         }
+    }
+}
+
+// MARK: - Mix-tick helpers (kept out of the class body to bound its size)
+
+private extension MixEngine {
+    /// Sum the active lanes into `scratch` (mic LAST so the monitor can be fed without
+    /// it) and tee the result to the monitor + recorder. When mic-monitoring is off the
+    /// monitor gets the pre-mic mix; the recorder (and the loopback ring) always get the
+    /// full mix including the mic.
+    func sumLanesAndTee(micActive: Bool, frameCount: Int) {
+        vDSP_vclr(scratch, 1, vDSP_Length(frameCount * 2))
+        if captureActive { macBuffer.readAdd(into: scratch, frames: frameCount) }
+
+        let monitorExcludesMic = micActive && !micInMonitor
+        if monitorExcludesMic { monitor.enqueue(scratch, frames: frameCount) }   // pre-mic
+
+        if micActive { micBuffer.readAdd(into: scratch, frames: frameCount) }    // → full mix
+
+        if !monitorExcludesMic { monitor.enqueue(scratch, frames: frameCount) }
+        recorder.write(scratch, frames: frameCount)
+    }
+
+    /// Write up to `frames` of the finished mix from `scratch` into the shmem ring, up to
+    /// its free space; drop the overflow. The driver consumer has priority — when nothing
+    /// drains the ring we simply stop feeding it (and stop the heartbeat), rather than
+    /// stalling the lanes/monitor.
+    func writeMixToRing(frames: Int, ringData: UnsafeMutablePointer<Float>,
+                        writeIdx: UnsafeMutablePointer<UInt64>,
+                        readIdx: UnsafeMutablePointer<UInt64>,
+                        heartbeatPtr: UnsafeMutablePointer<UInt64>) {
+        let shmemFree = Int(frameCapacity - (writeIdx.pointee &- readIdx.pointee))
+        let toShm = min(frames, shmemFree)
+        guard toShm > 0 else { return }
+        let cap = Int(frameCapacity)
+        var writePos = writeIdx.pointee
+        var done = 0
+        while done < toShm {
+            let pos = Int(writePos & UInt64(cap - 1))
+            let seg = min(toShm - done, cap - pos)
+            (ringData + pos * 2).update(from: scratch + done * 2, count: seg * 2)
+            writePos &+= UInt64(seg); done += seg
+        }
+        OSMemoryBarrier()
+        writeIdx.pointee = writePos
+        heartbeatPtr.pointee = heartbeatPtr.pointee &+ 1
     }
 }
