@@ -57,6 +57,10 @@ public final class MixMonitor {
     /// Linear 0…1 monitor volume. RT-safe (a single store, read in the callback).
     public func setVolume(_ value: Float) { volumePtr.pointee = max(0, min(value, 1)) }
 
+    /// Frames currently buffered ahead of the output unit (benign cross-thread read;
+    /// for the occupancy log). Roughly the monitor's added latency in frames.
+    public var ringOccupancy: Int { Int(wIdx.pointee &- rIdx.pointee) }
+
     /// Start (or re-point) monitoring to `deviceUID`. Idempotent for an unchanged
     /// device. Throws if the device can't be opened.
     public func start(deviceUID: String) throws {

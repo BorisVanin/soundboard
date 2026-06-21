@@ -23,12 +23,17 @@ public final class MixEngine {
 
     // Driver device + custom HAL properties (SHMEM.md §2).
     private static let deviceUID = "ca.borisvanin.soundboard.device"
+    // The system-output capture device: the system plays into it, the driver produces
+    // its audio into the capture ring, and this engine drains it as the Mac lane
+    // (replacing the old process tap). Must match kDevice2_UID in the driver.
+    private static let captureDeviceUID = "ca.borisvanin.soundboard.system"
     private static let propRingInfo: AudioObjectPropertySelector = 0x73626E69  // 'sbni'
     private static let propRingSession: AudioObjectPropertySelector = 0x73626E73  // 'sbns'
     private static let ringInfoBytes = 88
 
     private static let laneFrames = 8192   // per-lane buffer (~170 ms @ 48k)
     private static let mixChunk   = 1024   // max frames mixed per tick
+    private static let statsLogIntervalNs: UInt64 = 1_000_000_000   // log occupancy 1×/s
 
     private let logger = Logger(subsystem: "ca.borisvanin.soundboard", category: "MixEngine")
 
@@ -41,11 +46,34 @@ public final class MixEngine {
     private var session: UInt64 = 0
     private var deviceID = AudioObjectID(kAudioObjectUnknown)
 
-    // Lanes + their buffers (mic; system tap).
+    // Lanes + their buffers. Mic is captured locally (MicSoundLane); the Mac lane is
+    // now the system-output capture device drained from the capture ring (no tap).
     private let micLane: SoundLane = MicSoundLane()
-    private let macLane: SoundLane = MacSoundLane()
     private let micBuffer = LaneBuffer(frames: MixEngine.laneFrames)
     private let macBuffer = LaneBuffer(frames: MixEngine.laneFrames)
+
+    // Capture ring client (driver→app): the system-output device's audio. Mapped as a
+    // consumer; `pumpCapture` drains it into `macBuffer` on the mix queue.
+    private var captureBase: UnsafeMutableRawPointer?
+    private var captureBytes = 0
+    private var captureData: UnsafeMutablePointer<Float>?
+    private var captureWriteIdx, captureReadIdx, captureHeartbeat, captureAppSession: UnsafeMutablePointer<UInt64>?
+    private var captureCapacity: UInt64 = 0
+    private var captureSession: UInt64 = 0
+    private var captureDeviceID = AudioObjectID(kAudioObjectUnknown)
+    private var captureActive = false
+    // The output device the Mac fader/mute control (the selected system output). Usually
+    // "Soundboard System" but may be any output device the user picks.
+    private var macOutputDeviceID = AudioObjectID(kAudioObjectUnknown)
+    // Occupancy logging is OFF by default (saves CPU); toggled cross-process via the
+    // driver's StatsLog property, which the CLI sets and this listener observes.
+    private var loggingEnabled = false
+    private var statsListener: AudioObjectPropertyListenerBlock?
+    private let controlQueue = DispatchQueue(label: "ca.borisvanin.soundboard.control")
+    private static let propStatsLog: AudioObjectPropertySelector = 0x73626C67  // 'sblg'
+    // Mac-lane peak meters, written by `pumpCapture`, read+reset by `consumeMacMeters`.
+    private let macMeterL = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+    private let macMeterR = UnsafeMutablePointer<Float>.allocate(capacity: 1)
 
     // Monitor: plays the finished mix to a user-chosen output device. Fed by the
     // mix tick (a tee of the same buffer written to the shmem ring).
@@ -59,16 +87,31 @@ public final class MixEngine {
     private var mixTimer: DispatchSourceTimer?
     private let scratch = UnsafeMutablePointer<Float>.allocate(capacity: MixEngine.mixChunk * 2)
 
-    public init() {}
+    // Ring-occupancy instrumentation, aggregated on the mix queue and logged 1×/s so
+    // we can size the latency caps from real numbers without flooding the log.
+    private struct Occ {
+        var minV = Int.max, maxV = 0, sum = 0, count = 0
+        mutating func sample(_ frames: Int) {
+            if frames < minV { minV = frames }
+            if frames > maxV { maxV = frames }
+            sum += frames; count += 1
+        }
+        var avg: Int { count > 0 ? sum / count : 0 }
+        var active: Bool { count > 0 }
+    }
+    private var micOcc = Occ(), macOcc = Occ(), monOcc = Occ()
+    private var statsLastNs: UInt64 = 0
+
+    public init() { macMeterL.pointee = 0; macMeterR.pointee = 0 }
     deinit {
-        micLane.stop(); macLane.stop()
+        micLane.stop(); detachCaptureRing()
         stopMixer(); detach()
-        scratch.deallocate()
+        scratch.deallocate(); macMeterL.deallocate(); macMeterR.deallocate()
     }
 
     // MARK: - Public surface
 
-    public var isRunning: Bool { micLane.isRunning || macLane.isRunning }
+    public var isRunning: Bool { micLane.isRunning || captureActive }
 
     /// Mic lane: capture `channels` of `micUID`. Nil/empty stops it.
     public func configure(micUID: String?, channels: [Int]) {
@@ -84,21 +127,32 @@ public final class MixEngine {
     public func setMicGain(_ gain: Float, muted: Bool) { micLane.setGain(gain, muted: muted) }
     public func consumeMicMeters() -> LaneMeters { micLane.consumeMeters() }
 
-    /// Mac (system-audio) lane: tap the audio of output device `sourceUID` (or all
-    /// system output when `sourceUID == ""`). `nil` stops the lane. Scoping to a
-    /// device only reads its stream — it never changes the system's default output.
+    /// Mac (system-audio) lane: enable/disable draining the capture ring. The capture
+    /// source is whatever the system plays into the "Soundboard System" output device;
+    /// `sourceUID` no longer selects a device (the picker is unchanged for now and just
+    /// acts as an on/off). `nil` detaches the capture ring.
     public func setMacSource(_ sourceUID: String?) {
-        guard let sourceUID else { macLane.stop(); return }
+        guard let sourceUID else { detachCaptureRing(); macOutputDeviceID = kAudioObjectUnknown; return }
+        macOutputDeviceID = AudioDevices.deviceID(forUID: sourceUID) ?? kAudioObjectUnknown
         do {
-            try ensureAttached()
-            try macLane.start(source: sourceUID, channels: [], sink: macBuffer.sink)
+            try ensureAttached()        // mix (output) ring + mixer timer
+            try attachCaptureRing()     // capture (input) ring — the system-audio source
         } catch {
-            logger.error("MixEngine mac start failed: \(String(describing: error))")
-            macLane.stop()
+            logger.error("MixEngine capture attach failed: \(String(describing: error))")
+            detachCaptureRing()
         }
     }
-    public func setMacGain(_ gain: Float, muted: Bool) { macLane.setGain(gain, muted: muted) }
-    public func consumeMacMeters() -> LaneMeters { macLane.consumeMeters() }
+    /// Mac volume is applied on the selected output device via its
+    /// `kAudioDevicePropertyVolumeScalar` so the gain leaves the app's RT path entirely
+    /// (for "Soundboard System" the driver applies it). `muted` forces zero.
+    public func setMacGain(_ gain: Float, muted: Bool) {
+        setDeviceVolume(macOutputDeviceID, muted ? 0 : max(0, min(gain, 1)))
+    }
+    public func consumeMacMeters() -> LaneMeters {
+        let left = macMeterL.pointee, right = macMeterR.pointee
+        macMeterL.pointee = 0; macMeterR.pointee = 0
+        return LaneMeters(count: captureActive ? 2 : 0, left: left, right: right)
+    }
 
     /// Monitor the mix on `deviceUID` when `enabled`; stop otherwise. Playing the
     /// mix never touches the lanes or the shmem ring — it's a tee of the mixer's
@@ -134,7 +188,7 @@ public final class MixEngine {
     /// Stop both lanes and release the ring. (Lanes first — once detached the
     /// mixer must not touch the ring.)
     public func stop() {
-        micLane.stop(); macLane.stop(); monitor.stop()
+        micLane.stop(); detachCaptureRing(); monitor.stop()
         recorder.disable(); stopMixer(); recorder.close()   // flush ticks before closing the file
         detach()
     }
@@ -157,11 +211,16 @@ public final class MixEngine {
 
     private func mixTick() {
         guard let ringData, let writeIdx, let readIdx, let heartbeatPtr else { return }
+        pumpCapture()         // drain the capture ring → macBuffer (system-audio source)
+        if loggingEnabled {   // off by default (no per-tick stats work); toggled via StatsLog
+            maybeLogOccupancy()   // 1×/s
+            recordOccupancy()     // sample ring depths for the log
+        }
 
         // Active lanes and how many frames are mixable this tick.
         var lanes: [LaneBuffer] = []
         if micLane.isRunning { lanes.append(micBuffer) }
-        if macLane.isRunning { lanes.append(macBuffer) }
+        if captureActive { lanes.append(macBuffer) }
         guard !lanes.isEmpty else { return }
 
         // Frames available from the lanes this tick — bounded by the chunk size, not
@@ -199,6 +258,34 @@ public final class MixEngine {
         OSMemoryBarrier()
         writeIdx.pointee = writePos
         heartbeatPtr.pointee = heartbeatPtr.pointee &+ 1
+    }
+
+    /// Sample each active ring's occupancy for the once-a-second log.
+    private func recordOccupancy() {
+        if micLane.isRunning { micOcc.sample(micBuffer.available) }
+        if captureActive { macOcc.sample(macBuffer.available) }
+        if monitor.isRunning { monOcc.sample(monitor.ringOccupancy) }
+    }
+
+    /// Emit a single occupancy summary (min/avg/max frames + ms) per ring once a
+    /// second, then reset the accumulators — enough to spot trouble, not enough to
+    /// flood the log.
+    private func maybeLogOccupancy() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        if statsLastNs == 0 { statsLastNs = now; return }
+        guard now &- statsLastNs >= Self.statsLogIntervalNs else { return }
+        statsLastNs = now
+
+        func fmt(_ name: String, _ occ: Occ) -> String {
+            guard occ.active else { return "\(name)[idle]" }
+            let millis: (Int) -> Double = { Double($0) / 48.0 }   // 48 frames per ms @ 48 kHz
+            return String(format: "%@[%d/%d/%d f, %.1f/%.1f/%.1f ms]",
+                          name, occ.minV, occ.avg, occ.maxV,
+                          millis(occ.minV), millis(occ.avg), millis(occ.maxV))
+        }
+        let line = "\(fmt("mic", micOcc)) \(fmt("mac", macOcc)) \(fmt("monitor", monOcc))"
+        logger.info("buffer occupancy (min/avg/max) 1s — \(line, privacy: .public)")
+        micOcc = Occ(); macOcc = Occ(); monOcc = Occ()
     }
 
     // MARK: - Ring attach / detach (client)
@@ -262,11 +349,188 @@ public final class MixEngine {
         ringBase = nil; ringData = nil; writeIdx = nil; readIdx = nil; appSessionPtr = nil; heartbeatPtr = nil
         ringBytes = 0; frameCapacity = 0; session = 0; deviceID = AudioObjectID(kAudioObjectUnknown)
     }
+}
+
+// Capture-ring client + HAL property helpers, split into an extension to keep the
+// main class body within the lint cap.
+extension MixEngine {
+
+    // MARK: - Capture ring (driver→app): the system-output device as the Mac lane
+
+    /// Map the capture ring exported by the "Soundboard System" device and claim it as
+    /// the consumer. Idempotent. Mirrors `ensureAttached` but this side *reads* the ring
+    /// (the driver produces) — we advance `readIndex` and beat `heartbeat` in `pumpCapture`.
+    private func attachCaptureRing() throws {
+        guard captureBase == nil else { return }
+        guard let dev = findDevice(uid: Self.captureDeviceUID) else { throw RingError.noDevice }
+        guard let info = getRingInfo(dev) else { throw RingError.noDevice }
+        guard info.driverState == Self.ringAlive else { throw RingError.notReady }
+
+        let fileDescriptor = info.name.withCString { Self.shmOpenC($0, O_RDWR, 0) }
+        if fileDescriptor < 0 { throw RingError.shm(errno) }
+        let total = Self.headerBytes + Int(info.frameCapacity) * Int(info.channels) * MemoryLayout<Float>.size
+        guard let base = mmap(nil, total, PROT_READ | PROT_WRITE, MAP_SHARED, fileDescriptor, 0),
+              base != MAP_FAILED else {
+            let mapError = errno; close(fileDescriptor); throw RingError.map(mapError)
+        }
+        close(fileDescriptor)
+
+        let magic = base.loadUnaligned(fromByteOffset: Self.offMagic, as: UInt32.self)
+        let ver   = base.loadUnaligned(fromByteOffset: Self.offVersion, as: UInt16.self)
+        let channels = base.loadUnaligned(fromByteOffset: Self.offChannels, as: UInt16.self)
+        let dataOff = base.loadUnaligned(fromByteOffset: Self.offDataOffset, as: UInt64.self)
+        guard magic == Self.magic, ver == Self.version, channels == 2 else {
+            munmap(base, total); throw RingError.badHeader
+        }
+
+        let data    = (base + Int(dataOff)).assumingMemoryBound(to: Float.self)
+        let appSess = (base + Self.offAppSession).assumingMemoryBound(to: UInt64.self)
+        let beat    = (base + Self.offHeartbeat).assumingMemoryBound(to: UInt64.self)
+        let wIdx    = (base + Self.offWriteIndex).assumingMemoryBound(to: UInt64.self)
+        let rIdx    = (base + Self.offReadIndex).assumingMemoryBound(to: UInt64.self)
+
+        // Start draining from the freshest sample, then claim: publish appSession and
+        // grant via RingSession so the driver's `produce` gate opens.
+        rIdx.pointee = wIdx.pointee
+        let claim = (UInt64(UInt32(bitPattern: getpid())) << 32) | UInt64(UInt32.random(in: 1...UInt32.max))
+        appSess.pointee = claim
+        OSMemoryBarrier()
+        setRingSession(dev, claim)
+        registerStatsListener(on: dev)   // observe the StatsLog toggle on the capture device
+
+        // Publish to the mix queue atomically: the mixer may already be running (mic
+        // active), so flip `captureActive` last, under the queue, after the pointers.
+        mixQueue.sync {
+            captureBase = base; captureBytes = total
+            captureCapacity = UInt64(info.frameCapacity); captureDeviceID = dev; captureSession = claim
+            captureData = data; captureAppSession = appSess; captureHeartbeat = beat
+            captureWriteIdx = wIdx; captureReadIdx = rIdx
+            captureActive = true
+        }
+        logger.info("MixEngine attached capture '\(info.name)' (\(self.captureCapacity) frames) + claimed \(self.captureSession)")
+    }
+
+    private func detachCaptureRing() {
+        // Retract under the mix queue so no in-flight `pumpCapture` touches the mapping
+        // we are about to unmap, then do the slow teardown off-queue.
+        var base: UnsafeMutableRawPointer?
+        var bytes = 0
+        var dev = AudioObjectID(kAudioObjectUnknown)
+        var appSess: UnsafeMutablePointer<UInt64>?
+        mixQueue.sync {
+            guard captureActive || captureBase != nil else { return }
+            captureActive = false
+            base = captureBase; bytes = captureBytes; dev = captureDeviceID; appSess = captureAppSession
+            captureBase = nil; captureData = nil; captureWriteIdx = nil; captureReadIdx = nil
+            captureAppSession = nil; captureHeartbeat = nil
+            captureBytes = 0; captureCapacity = 0; captureSession = 0
+            captureDeviceID = AudioObjectID(kAudioObjectUnknown)
+            macMeterL.pointee = 0; macMeterR.pointee = 0
+        }
+        guard let base else { return }
+        if dev != kAudioObjectUnknown { removeStatsListener(from: dev); setRingSession(dev, 0) }
+        appSess?.pointee = 0
+        munmap(base, bytes)
+    }
+
+    /// Observe the driver's StatsLog property on the capture device: when the CLI flips
+    /// it, enable/disable the per-second occupancy logging (off by default to save CPU).
+    private func registerStatsListener(on dev: AudioObjectID) {
+        loggingEnabled = readStatsLog(dev)
+        var addr = AudioObjectPropertyAddress(mSelector: Self.propStatsLog,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            self.loggingEnabled = self.readStatsLog(dev)
+        }
+        statsListener = block
+        AudioObjectAddPropertyListenerBlock(dev, &addr, controlQueue, block)
+    }
+
+    private func removeStatsListener(from dev: AudioObjectID) {
+        guard let block = statsListener else { return }
+        var addr = AudioObjectPropertyAddress(mSelector: Self.propStatsLog,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        AudioObjectRemovePropertyListenerBlock(dev, &addr, controlQueue, block)
+        statsListener = nil
+        loggingEnabled = false
+    }
+
+    /// Read the StatsLog custom property (CFData of one UInt32) → on/off.
+    private func readStatsLog(_ dev: AudioObjectID) -> Bool {
+        var addr = AudioObjectPropertyAddress(mSelector: Self.propStatsLog,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        var unmanaged: Unmanaged<CFData>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFData>?>.size)
+        let status = withUnsafeMutablePointer(to: &unmanaged) {
+            AudioObjectGetPropertyData(dev, &addr, 0, nil, &size, $0)
+        }
+        guard status == noErr, let data = unmanaged?.takeRetainedValue(),
+              CFDataGetLength(data) >= 4 else { return false }
+        var value: UInt32 = 0
+        withUnsafeMutableBytes(of: &value) { CFDataGetBytes(data, CFRange(location: 0, length: 4),
+                                                            $0.bindMemory(to: UInt8.self).baseAddress) }
+        return value != 0
+    }
+
+    /// Mix-queue producer into `macBuffer`: drain the freshest capture-ring frames the
+    /// driver produced (already volume-scaled), meter them, and beat the heartbeat so
+    /// the driver keeps producing. Drop-on-full at the lane buffer (the trim caps latency).
+    private func pumpCapture() {
+        guard captureActive, let cData = captureData, let cWrite = captureWriteIdx,
+              let cRead = captureReadIdx, let cBeat = captureHeartbeat else { return }
+        cBeat.pointee = cBeat.pointee &+ 1            // liveness for the driver's produce gate
+
+        let ccap = Int(captureCapacity)
+        var readPos = cRead.pointee
+        let writePos = cWrite.pointee
+        var avail = Int(writePos &- readPos)
+        if avail <= 0 { return }
+        if avail > ccap { readPos = writePos &- UInt64(ccap); avail = ccap }   // lapped → skip stale
+
+        let sink = macBuffer.sink
+        let mcap = Int(sink.frameCapacity)
+        let free = mcap - Int(sink.writeIndex.pointee &- sink.readIndex.pointee)
+        let take = min(avail, free)
+        guard take > 0 else { cRead.pointee = readPos; return }
+
+        let writeBase = sink.writeIndex.pointee
+        var leftPeak = macMeterL.pointee, rightPeak = macMeterR.pointee
+        var index = 0
+        while index < take {
+            let src = Int((readPos &+ UInt64(index)) & UInt64(ccap - 1)) * 2
+            let dst = Int((writeBase &+ UInt64(index)) & UInt64(mcap - 1)) * 2
+            let left = cData[src], right = cData[src + 1]
+            sink.data[dst] = left; sink.data[dst + 1] = right
+            let absL = left < 0 ? -left : left; if absL > leftPeak { leftPeak = absL }
+            let absR = right < 0 ? -right : right; if absR > rightPeak { rightPeak = absR }
+            index &+= 1
+        }
+        macMeterL.pointee = leftPeak; macMeterR.pointee = rightPeak
+        OSMemoryBarrier()
+        sink.writeIndex.pointee = writeBase &+ UInt64(take)
+        cRead.pointee = readPos &+ UInt64(take)
+    }
+
+    /// Set an output device's volume scalar (main element). For "Soundboard System" the
+    /// driver applies it to system audio before the capture ring; for a real device it
+    /// drives the hardware/software volume.
+    private func setDeviceVolume(_ dev: AudioObjectID, _ scalar: Float) {
+        guard dev != kAudioObjectUnknown else { return }
+        var value = scalar
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyVolumeScalar,
+                                              mScope: kAudioObjectPropertyScopeOutput,
+                                              mElement: kAudioObjectPropertyElementMain)
+        AudioObjectSetPropertyData(dev, &addr, 0, nil, UInt32(MemoryLayout<Float32>.size), &value)
+    }
 
     // MARK: - HAL property helpers (the SHMEM.md §2 handshake)
 
-    private func findDevice() -> AudioDeviceID? {
-        var uid = Self.deviceUID as CFString
+    private func findDevice(uid uidString: String = MixEngine.deviceUID) -> AudioDeviceID? {
+        var uid = uidString as CFString
         var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyTranslateUIDToDevice,
                                               mScope: kAudioObjectPropertyScopeGlobal,
                                               mElement: kAudioObjectPropertyElementMain)

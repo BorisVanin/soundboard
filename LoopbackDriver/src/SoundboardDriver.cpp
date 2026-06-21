@@ -64,10 +64,15 @@ os_log_t gLog;
 // ---------------------------------------------------------------- Topology
 enum : AudioObjectID {
     kObjectID_PlugIn        = kAudioObjectPlugInObject, // 1
-    kObjectID_Device        = 2,
+    kObjectID_Device        = 2,   // "Soundboard" — input-only loopback mic (app→ring→input)
     kObjectID_Stream_Input  = 3,
-    kObjectID_Stream_Output = 4,
-    kObjectID_Volume_Output = 5,   // output volume control
+    kObjectID_Stream_Output = 4,   // (vestigial) the mic device exposes no output stream
+    kObjectID_Volume_Output = 5,   // (vestigial)
+    // "Soundboard System" — output-only device the system plays into; its WriteMix is
+    // produced into the capture ring (driver→ring→app), replacing the process tap.
+    kObjectID_Device2        = 6,
+    kObjectID_Stream2_Output = 7,
+    kObjectID_Volume2_Output = 8,
 };
 
 constexpr Float32 kVolumeMinDB = -64.0f;
@@ -89,9 +94,17 @@ constexpr const char* kDevice_ModelUID = "ca.borisvanin.soundboard.model";
 constexpr const char* kDevice_NameDefault = "Soundboard";
 constexpr const char* kManufacturer    = "Boris Vanin";
 
+// Second device: the system-output capture device. Fixed canonical format (48k / 2 /
+// float32) so the mic device's dynamic format negotiation can never corrupt it —
+// coreaudiod resamples system audio to this device, exactly as for a fixed-format card.
+constexpr const char* kDevice2_UID      = "ca.borisvanin.soundboard.system";
+constexpr const char* kDevice2_ModelUID = "ca.borisvanin.soundboard.system.model";
+constexpr const char* kDevice2_Name     = "Soundboard System";
+
 constexpr Float64 kDefaultSampleRate = 48000.0;
 constexpr UInt32  kDefaultChannels   = 2;
 constexpr UInt32  kRingFrames        = 48000; // 1 s at 48k
+
 constexpr UInt32  kMaxChannels       = 8;
 constexpr UInt32  kMaxBytesPerSample = 4;
 [[maybe_unused]] constexpr UInt32 kMaxBytesPerFrame = kMaxChannels * kMaxBytesPerSample;
@@ -178,7 +191,8 @@ public:
     OSStatus startIO();
     OSStatus stopIO();
     OSStatus getZeroTimeStamp(Float64* outSample, UInt64* outHost, UInt64* outSeed);
-    OSStatus doIO(UInt32 op, UInt32 frames, const AudioServerPlugInIOCycleInfo* cycle, void* mainBuffer);
+    OSStatus doIO(AudioObjectID device, UInt32 op, UInt32 frames,
+                  const AudioServerPlugInIOCycleInfo* cycle, void* mainBuffer);
 
 private:
     Driver();
@@ -200,8 +214,12 @@ private:
     std::mutex                  mMutex;     // guards mFormat/mPending/IO bookkeeping
     AudioStreamBasicDescription mFormat{};
     AudioStreamBasicDescription mPending{};
+    AudioStreamBasicDescription mFormat2{};   // Device2 (system capture): fixed canonical, never negotiated
     std::atomic<UInt32>         mBytesPerFrame{ 0 }; // lock-free read on the RT thread
     std::atomic<float>          mVolumeScalar{ 1.0f }; // output volume (0..1), RT-read
+    std::atomic<float>          mCaptureVolume{ 1.0f }; // Device2 system-audio volume (0..1), RT-read
+    std::atomic<UInt32>         mStatsLog{ 0 };          // app occupancy-log toggle (stored; app observes)
+    std::atomic<bool>           mLoggedBufferSize2{ false }; // log Device2's final IO size once per StartIO
     std::atomic<float>          mLevelL{ 0 }, mLevelR{ 0 };  // decaying level meters
     std::atomic<float>          mPeakL{ 0 }, mPeakR{ 0 };    // peak-hold meters
 
@@ -224,6 +242,11 @@ private:
     // device's input source. Granted via the RingSession property, consumed (RT)
     // in ReadInput. All the ring/protocol logic lives in RingOwner (unit-tested).
     RingOwner mShmRing;
+
+    // Capture ring (driver→app): the system-output device's WriteMix is produced into
+    // it; the app consumes it as its Mac lane, replacing the process tap. Created at
+    // Initialize, owned for the driver's lifetime.
+    RingOwner mCaptureRing;
 };
 
 UInt32 buildAvailableFormats(AudioStreamRangedDescription* out, UInt32 cap)
@@ -345,7 +368,7 @@ OSStatus T_WillDoIOOperation(AudioServerPlugInDriverRef, AudioObjectID, UInt32, 
     return kAudioHardwareNoError;
 }
 OSStatus T_BeginIOOperation(AudioServerPlugInDriverRef, AudioObjectID, UInt32, UInt32, UInt32, const AudioServerPlugInIOCycleInfo*) { return kAudioHardwareNoError; }
-OSStatus T_DoIOOperation(AudioServerPlugInDriverRef, AudioObjectID, AudioObjectID, UInt32, UInt32 op, UInt32 frames, const AudioServerPlugInIOCycleInfo* cycle, void* mainBuffer, void*) { return Driver::shared().doIO(op, frames, cycle, mainBuffer); }
+OSStatus T_DoIOOperation(AudioServerPlugInDriverRef, AudioObjectID device, AudioObjectID, UInt32, UInt32 op, UInt32 frames, const AudioServerPlugInIOCycleInfo* cycle, void* mainBuffer, void*) { return Driver::shared().doIO(device, op, frames, cycle, mainBuffer); }
 OSStatus T_EndIOOperation(AudioServerPlugInDriverRef, AudioObjectID, UInt32, UInt32, UInt32, const AudioServerPlugInIOCycleInfo*) { return kAudioHardwareNoError; }
 
 // ============================================================ Driver methods
@@ -354,6 +377,7 @@ Driver::Driver()
     mFormat        = makeASBD(kDefaultSampleRate, kDefaultChannels, 32, 4, true);
     mPending       = mFormat;
     mBytesPerFrame = mFormat.mBytesPerFrame;
+    mFormat2       = makeASBD(kDefaultSampleRate, kDefaultChannels, 32, 4, true);  // fixed canonical
 }
 
 void Driver::buildInterface()
@@ -390,11 +414,16 @@ OSStatus Driver::initialize(AudioServerPlugInHostRef host)
     if (!gLog) gLog = os_log_create("ca.borisvanin.soundboard", "driver");
     mHost = host;
     recomputeTiming();
-    // Create + own the mix ring for the driver's lifetime (SHMEM.md §1).
+    // Create + own the mix ring (app→input) and the capture ring (output→app) for the
+    // driver's lifetime (SHMEM.md §1).
     if (mShmRing.create(kSoundboardRingName))
         os_log(gLog, "MixRing: created '%{public}s'", kSoundboardRingName);
     else
         os_log_error(gLog, "MixRing: create failed errno=%d", mShmRing.lastErrno());
+    if (mCaptureRing.create(kSoundboardCaptureRingName))
+        os_log(gLog, "CaptureRing: created '%{public}s'", kSoundboardCaptureRingName);
+    else
+        os_log_error(gLog, "CaptureRing: create failed errno=%d", mCaptureRing.lastErrno());
     os_log(gLog, "Initialize: name='%{public}s' %.0f Hz / %u ch", kDevice_NameDefault,
            mFormat.mSampleRate, mFormat.mChannelsPerFrame);
     return kAudioHardwareNoError;
@@ -517,10 +546,21 @@ OSStatus Driver::getPropertyData(AudioObjectID obj, const AudioObjectPropertyAdd
         case kAudioObjectPropertyOwner:        PUT(AudioObjectID, kAudioObjectUnknown);
         case kAudioObjectPropertyManufacturer: PUT(CFStringRef, CFStringCreateWithCString(nullptr, kManufacturer, kCFStringEncodingUTF8));
         case kAudioObjectPropertyOwnedObjects:
-        case kAudioPlugInPropertyDeviceList: { AudioObjectID dev = kObjectID_Device; return putArray(&dev, sizeof(dev), 1, inSize, outSize, outData); }
+        case kAudioPlugInPropertyDeviceList: {
+            AudioObjectID devs[2] = { kObjectID_Device, kObjectID_Device2 };
+            return putArray(devs, sizeof(AudioObjectID), 2, inSize, outSize, outData);
+        }
         case kAudioPlugInPropertyTranslateUIDToDevice: {
             AudioObjectID r = kAudioObjectUnknown;
-            if (qData && CFEqual(*static_cast<const CFStringRef*>(qData), CFSTR(kSoundboardDeviceUID))) r = kObjectID_Device;
+            if (qData) {
+                CFStringRef uid = *static_cast<const CFStringRef*>(qData);
+                if (CFEqual(uid, CFSTR(kSoundboardDeviceUID))) {
+                    r = kObjectID_Device;
+                } else if (CFStringRef u2 = CFStringCreateWithCString(nullptr, kDevice2_UID, kCFStringEncodingUTF8)) {
+                    if (CFEqual(uid, u2)) r = kObjectID_Device2;
+                    CFRelease(u2);
+                }
+            }
             PUT(AudioObjectID, r);
         }
         case kAudioPlugInPropertyResourceBundle: PUT(CFStringRef, CFStringCreateWithCString(nullptr, "", kCFStringEncodingUTF8));
@@ -618,6 +658,100 @@ OSStatus Driver::getPropertyData(AudioObjectID obj, const AudioObjectPropertyAdd
         }
         break;
 
+    case kObjectID_Device2:   // "Soundboard System" — output-only system-audio capture
+        switch (sel) {
+        case kAudioObjectPropertyBaseClass:    PUT(AudioClassID, kAudioObjectClassID);
+        case kAudioObjectPropertyClass:        PUT(AudioClassID, kAudioDeviceClassID);
+        case kAudioObjectPropertyOwner:        PUT(AudioObjectID, kObjectID_PlugIn);
+        case kAudioObjectPropertyName:         PUT(CFStringRef, CFStringCreateWithCString(nullptr, kDevice2_Name, kCFStringEncodingUTF8));
+        case kAudioObjectPropertyManufacturer: PUT(CFStringRef, CFStringCreateWithCString(nullptr, kManufacturer, kCFStringEncodingUTF8));
+        case kSoundboardCustomProperty_RingInfo: {     // capture-ring discovery GET
+            SoundboardRingInfo ri = mCaptureRing.info();
+            PUT(CFDataRef, CFDataCreate(nullptr, reinterpret_cast<const UInt8*>(&ri), sizeof(ri)));
+        }
+        case kSoundboardCustomProperty_RingSession: {  // capture-ring granted session GET
+            uint64_t s = mCaptureRing.grantedSession();
+            PUT(CFDataRef, CFDataCreate(nullptr, reinterpret_cast<const UInt8*>(&s), sizeof(s)));
+        }
+        case kAudioObjectPropertyCustomPropertyInfoList: {
+            AudioServerPlugInCustomPropertyInfo info[3]{};
+            info[0].mSelector = kSoundboardCustomProperty_RingInfo;
+            info[1].mSelector = kSoundboardCustomProperty_RingSession;
+            info[2].mSelector = kSoundboardCustomProperty_StatsLog;
+            for (auto& it : info) {
+                it.mPropertyDataType  = kAudioServerPlugInCustomPropertyDataTypeCFPropertyList;
+                it.mQualifierDataType = kAudioServerPlugInCustomPropertyDataTypeNone;
+            }
+            return putArray(info, sizeof(AudioServerPlugInCustomPropertyInfo), 3, inSize, outSize, outData);
+        }
+        case kSoundboardCustomProperty_StatsLog: {
+            UInt32 v = mStatsLog.load();
+            PUT(CFDataRef, CFDataCreate(nullptr, reinterpret_cast<const UInt8*>(&v), sizeof(v)));
+        }
+        case kAudioObjectPropertyOwnedObjects: {
+            if (scope == kAudioObjectPropertyScopeInput) { if (outSize) *outSize = 0; return kAudioHardwareNoError; }
+            AudioObjectID objs[2] = { kObjectID_Stream2_Output, kObjectID_Volume2_Output };
+            return putArray(objs, sizeof(AudioObjectID), 2, inSize, outSize, outData);
+        }
+        case kAudioDevicePropertyStreams: {
+            if (scope == kAudioObjectPropertyScopeInput) { if (outSize) *outSize = 0; return kAudioHardwareNoError; }
+            AudioObjectID s = kObjectID_Stream2_Output;
+            return putArray(&s, sizeof(s), 1, inSize, outSize, outData);
+        }
+        case kAudioObjectPropertyControlList: {
+            AudioObjectID c = kObjectID_Volume2_Output;
+            return putArray(&c, sizeof(c), 1, inSize, outSize, outData);
+        }
+        case kAudioDevicePropertyStreamConfiguration: {
+            UInt32 nbuf = (scope == kAudioObjectPropertyScopeOutput) ? 1 : 0;
+            UInt32 size = static_cast<UInt32>(offsetof(AudioBufferList, mBuffers)) + nbuf * static_cast<UInt32>(sizeof(AudioBuffer));
+            if (outData && inSize >= size) {
+                auto* abl = reinterpret_cast<AudioBufferList*>(outData);
+                abl->mNumberBuffers = nbuf;
+                for (UInt32 i = 0; i < nbuf; ++i) {
+                    abl->mBuffers[i].mNumberChannels = mFormat2.mChannelsPerFrame;
+                    abl->mBuffers[i].mDataByteSize   = 0;
+                    abl->mBuffers[i].mData           = nullptr;
+                }
+            }
+            if (outSize) *outSize = size;
+            return kAudioHardwareNoError;
+        }
+        case kAudioDevicePropertyDeviceUID:    PUT(CFStringRef, CFStringCreateWithCString(nullptr, kDevice2_UID, kCFStringEncodingUTF8));
+        case kAudioDevicePropertyModelUID:     PUT(CFStringRef, CFStringCreateWithCString(nullptr, kDevice2_ModelUID, kCFStringEncodingUTF8));
+        case kAudioDevicePropertyTransportType: PUT(UInt32, kAudioDeviceTransportTypeVirtual);
+        case kAudioDevicePropertyRelatedDevices: { AudioObjectID me = kObjectID_Device2; return putArray(&me, sizeof(me), 1, inSize, outSize, outData); }
+        case kAudioDevicePropertyClockDomain:  PUT(UInt32, 0);
+        case kAudioDevicePropertyDeviceIsAlive: PUT(UInt32, 1);
+        case kAudioDevicePropertyDeviceIsRunning:
+        case kAudioDevicePropertyDeviceIsRunningSomewhere: PUT(UInt32, mIORunning ? 1 : 0);
+        case kAudioDevicePropertyDeviceCanBeDefaultDevice:
+        case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice: PUT(UInt32, 1);
+        case kAudioDevicePropertyLatency:      PUT(UInt32, 0);
+        case kAudioDevicePropertySafetyOffset: PUT(UInt32, 0);
+        case kAudioDevicePropertyNominalSampleRate: PUT(Float64, mFormat2.mSampleRate);
+        case kAudioDevicePropertyAvailableNominalSampleRates: {
+            AudioValueRange r{ kDefaultSampleRate, kDefaultSampleRate };
+            return putArray(&r, sizeof(AudioValueRange), 1, inSize, outSize, outData);
+        }
+        case kAudioDevicePropertyIsHidden:     PUT(UInt32, 0);
+        case kAudioDevicePropertyZeroTimeStampPeriod: PUT(UInt32, kRingFrames);
+        case kAudioDevicePropertyPreferredChannelsForStereo: {
+            UInt32 ch[2] = {1, 2};
+            if (outData && inSize >= sizeof(ch)) std::memcpy(outData, ch, sizeof(ch));
+            if (outSize) *outSize = sizeof(ch);
+            return kAudioHardwareNoError;
+        }
+        case kAudioDevicePropertyPreferredChannelLayout: {
+            AudioChannelLayout l{};
+            l.mChannelLayoutTag = kAudioChannelLayoutTag_Stereo;
+            if (outData && inSize >= sizeof(l)) *reinterpret_cast<AudioChannelLayout*>(outData) = l;
+            if (outSize) *outSize = sizeof(l);
+            return kAudioHardwareNoError;
+        }
+        }
+        break;
+
     case kObjectID_Stream_Input:
     case kObjectID_Stream_Output:
         switch (sel) {
@@ -681,6 +815,66 @@ OSStatus Driver::getPropertyData(AudioObjectID obj, const AudioObjectPropertyAdd
         }
         }
         break;
+
+    case kObjectID_Stream2_Output:   // Device2's output stream (fixed canonical format)
+        switch (sel) {
+        case kAudioObjectPropertyBaseClass:   PUT(AudioClassID, kAudioObjectClassID);
+        case kAudioObjectPropertyClass:       PUT(AudioClassID, kAudioStreamClassID);
+        case kAudioObjectPropertyOwner:       PUT(AudioObjectID, kObjectID_Device2);
+        case kAudioObjectPropertyOwnedObjects: { if (outSize) *outSize = 0; return kAudioHardwareNoError; }
+        case kAudioStreamPropertyIsActive:    PUT(UInt32, 1);
+        case kAudioStreamPropertyDirection:   PUT(UInt32, 0);   // output
+        case kAudioStreamPropertyTerminalType: PUT(UInt32, kAudioStreamTerminalTypeSpeaker);
+        case kAudioStreamPropertyStartingChannel: PUT(UInt32, 1);
+        case kAudioStreamPropertyLatency:     PUT(UInt32, 0);
+        case kAudioStreamPropertyVirtualFormat:
+        case kAudioStreamPropertyPhysicalFormat: {
+            AudioStreamBasicDescription f = mFormat2;
+            if (outData && inSize >= sizeof(f)) *reinterpret_cast<AudioStreamBasicDescription*>(outData) = f;
+            if (outSize) *outSize = sizeof(f);
+            return kAudioHardwareNoError;
+        }
+        case kAudioStreamPropertyAvailableVirtualFormats:
+        case kAudioStreamPropertyAvailablePhysicalFormats: {
+            AudioStreamRangedDescription fmt{};
+            fmt.mFormat = mFormat2;
+            fmt.mSampleRateRange.mMinimum = kDefaultSampleRate;
+            fmt.mSampleRateRange.mMaximum = kDefaultSampleRate;
+            return putArray(&fmt, sizeof(AudioStreamRangedDescription), 1, inSize, outSize, outData);
+        }
+        }
+        break;
+
+    case kObjectID_Volume2_Output:   // Device2's system-audio volume control
+        switch (sel) {
+        case kAudioObjectPropertyBaseClass:    PUT(AudioClassID, kAudioLevelControlClassID);
+        case kAudioObjectPropertyClass:        PUT(AudioClassID, kAudioVolumeControlClassID);
+        case kAudioObjectPropertyOwner:        PUT(AudioObjectID, kObjectID_Device2);
+        case kAudioObjectPropertyOwnedObjects: { if (outSize) *outSize = 0; return kAudioHardwareNoError; }
+        case kAudioControlPropertyScope:       PUT(AudioObjectPropertyScope, kAudioObjectPropertyScopeOutput);
+        case kAudioControlPropertyElement:     PUT(AudioObjectPropertyElement, kAudioObjectPropertyElementMain);
+        case kAudioLevelControlPropertyScalarValue:  PUT(Float32, mCaptureVolume.load());
+        case kAudioLevelControlPropertyDecibelValue: PUT(Float32, volScalarToDB(mCaptureVolume.load()));
+        case kAudioLevelControlPropertyDecibelRange: {
+            AudioValueRange r{ kVolumeMinDB, kVolumeMaxDB };
+            if (outData && inSize >= sizeof(r)) *reinterpret_cast<AudioValueRange*>(outData) = r;
+            if (outSize) *outSize = sizeof(r);
+            return kAudioHardwareNoError;
+        }
+        case kAudioLevelControlPropertyConvertScalarToDecibels: {
+            if (outData && inSize >= sizeof(Float32))
+                *reinterpret_cast<Float32*>(outData) = volScalarToDB(*reinterpret_cast<Float32*>(outData));
+            if (outSize) *outSize = sizeof(Float32);
+            return kAudioHardwareNoError;
+        }
+        case kAudioLevelControlPropertyConvertDecibelsToScalar: {
+            if (outData && inSize >= sizeof(Float32))
+                *reinterpret_cast<Float32*>(outData) = volDBToScalar(*reinterpret_cast<Float32*>(outData));
+            if (outSize) *outSize = sizeof(Float32);
+            return kAudioHardwareNoError;
+        }
+        }
+        break;
     }
 
     // The HAL polls properties we don't implement (e.g. 'taps') continuously, so
@@ -705,7 +899,16 @@ OSStatus Driver::isSettable(AudioObjectID obj, const AudioObjectPropertyAddress*
          (sel == kAudioStreamPropertyVirtualFormat || sel == kAudioStreamPropertyPhysicalFormat)) ||
         (obj == kObjectID_Volume_Output &&
          (sel == kAudioLevelControlPropertyScalarValue || sel == kAudioLevelControlPropertyDecibelValue)) ||
-        (obj == kObjectID_Device && sel == kSoundboardCustomProperty_RingSession);
+        (obj == kObjectID_Device && sel == kSoundboardCustomProperty_RingSession) ||
+        // Device2 (system capture): the format is fixed but the HAL still negotiates it;
+        // accept-if-canonical so opening the device as output succeeds.
+        (obj == kObjectID_Device2 && sel == kAudioDevicePropertyNominalSampleRate) ||
+        (obj == kObjectID_Stream2_Output &&
+         (sel == kAudioStreamPropertyVirtualFormat || sel == kAudioStreamPropertyPhysicalFormat)) ||
+        (obj == kObjectID_Volume2_Output &&
+         (sel == kAudioLevelControlPropertyScalarValue || sel == kAudioLevelControlPropertyDecibelValue)) ||
+        (obj == kObjectID_Device2 && sel == kSoundboardCustomProperty_RingSession) ||
+        (obj == kObjectID_Device2 && sel == kSoundboardCustomProperty_StatsLog);
     if (outSettable) *outSettable = settable;
     return kAudioHardwareNoError;
 }
@@ -717,7 +920,9 @@ OSStatus Driver::setPropertyData(AudioObjectID obj, const AudioObjectPropertyAdd
     const AudioObjectPropertySelector sel = a->mSelector;
 
     // --- RingSession: the app claims (or releases, with 0) ring ownership ---
-    if (obj == kObjectID_Device && sel == kSoundboardCustomProperty_RingSession) {
+    // Device → the mix ring (app produces); Device2 → the capture ring (app consumes).
+    if ((obj == kObjectID_Device || obj == kObjectID_Device2) &&
+        sel == kSoundboardCustomProperty_RingSession) {
         if (!inData) return kAudioHardwareBadPropertySizeError;
         uint64_t session = 0;
         if (inSize == sizeof(CFDataRef)) {                 // marshaled as CFData
@@ -727,8 +932,67 @@ OSStatus Driver::setPropertyData(AudioObjectID obj, const AudioObjectPropertyAdd
         } else if (inSize >= sizeof(session)) {
             session = *reinterpret_cast<const uint64_t*>(inData);
         }
-        mShmRing.setSession(session);
-        os_log(gLog, "RingSession -> %llu", (unsigned long long)session);
+        RingOwner& ring = (obj == kObjectID_Device2) ? mCaptureRing : mShmRing;
+        ring.setSession(session);
+        os_log(gLog, "RingSession[%{public}s] -> %llu",
+               obj == kObjectID_Device2 ? "capture" : "mix", (unsigned long long)session);
+        return kAudioHardwareNoError;
+    }
+
+    // --- Device2 system-audio volume control ---
+    if (obj == kObjectID_Volume2_Output &&
+        (sel == kAudioLevelControlPropertyScalarValue || sel == kAudioLevelControlPropertyDecibelValue)) {
+        if (inSize < sizeof(Float32) || !inData) return kAudioHardwareBadPropertySizeError;
+        Float32 value = *reinterpret_cast<const Float32*>(inData);
+        Float32 scalar = (sel == kAudioLevelControlPropertyScalarValue) ? value : volDBToScalar(value);
+        scalar = scalar < 0 ? 0 : (scalar > 1 ? 1 : scalar);
+        mCaptureVolume.store(scalar);
+        if (mHost && mHost->PropertiesChanged) {
+            AudioObjectPropertyAddress addrs[] = {
+                { kAudioLevelControlPropertyScalarValue,  kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain },
+                { kAudioLevelControlPropertyDecibelValue, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain },
+            };
+            mHost->PropertiesChanged(mHost, kObjectID_Volume2_Output, 2, addrs);
+        }
+        return kAudioHardwareNoError;
+    }
+
+    // --- Device2 format: fixed canonical (48k/2/float). Accept the matching request
+    // the HAL makes when opening the device; reject anything else (HAL then resamples). ---
+    if (obj == kObjectID_Device2 && sel == kAudioDevicePropertyNominalSampleRate) {
+        if (inSize < sizeof(Float64) || !inData) return kAudioHardwareBadPropertySizeError;
+        return (*reinterpret_cast<const Float64*>(inData) == mFormat2.mSampleRate)
+                 ? kAudioHardwareNoError : kAudioDeviceUnsupportedFormatError;
+    }
+    if (obj == kObjectID_Stream2_Output &&
+        (sel == kAudioStreamPropertyVirtualFormat || sel == kAudioStreamPropertyPhysicalFormat)) {
+        if (inSize < sizeof(AudioStreamBasicDescription) || !inData) return kAudioHardwareBadPropertySizeError;
+        const auto& req = *reinterpret_cast<const AudioStreamBasicDescription*>(inData);
+        bool canonical = req.mSampleRate == mFormat2.mSampleRate &&
+                         req.mChannelsPerFrame == mFormat2.mChannelsPerFrame &&
+                         req.mBitsPerChannel == mFormat2.mBitsPerChannel &&
+                         (req.mFormatFlags & kAudioFormatFlagIsFloat) != 0;
+        return canonical ? kAudioHardwareNoError : kAudioDeviceUnsupportedFormatError;
+    }
+
+    // --- Occupancy-log toggle (custom control prop; stored, the app observes it) ---
+    if (obj == kObjectID_Device2 && sel == kSoundboardCustomProperty_StatsLog) {
+        UInt32 on = 0;
+        if (!inData) return kAudioHardwareBadPropertySizeError;
+        if (inSize == sizeof(CFDataRef)) {
+            CFDataRef d = *reinterpret_cast<const CFDataRef*>(inData);
+            if (d && CFDataGetLength(d) >= (CFIndex)sizeof(on))
+                CFDataGetBytes(d, CFRangeMake(0, sizeof(on)), reinterpret_cast<UInt8*>(&on));
+        } else if (inSize >= sizeof(on)) {
+            on = *reinterpret_cast<const UInt32*>(inData);
+        }
+        mStatsLog.store(on);
+        os_log(gLog, "StatsLog -> %u", on);
+        if (mHost && mHost->PropertiesChanged) {
+            AudioObjectPropertyAddress addr = {
+                kSoundboardCustomProperty_StatsLog, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+            mHost->PropertiesChanged(mHost, kObjectID_Device2, 1, &addr);
+        }
         return kAudioHardwareNoError;
     }
 
@@ -796,6 +1060,7 @@ OSStatus Driver::startIO()
         if (mIOCount++ == 0) {
             mAnchorHostTime = mach_absolute_time();
             mIORunning = true;
+            mLoggedBufferSize2.store(false);   // log Device2's negotiated IO size once next cycle
             // The mix ring is created + owned at Initialize and lives for the
             // driver's lifetime, so there is nothing to attach/detach per IO
             // session — and nothing touches the mapping from a non-RT path here.
@@ -840,13 +1105,34 @@ OSStatus Driver::getZeroTimeStamp(Float64* outSample, UInt64* outHost, UInt64* o
     return kAudioHardwareNoError;
 }
 
-OSStatus Driver::doIO(UInt32 op, UInt32 frames, const AudioServerPlugInIOCycleInfo* cycle, void* mainBuffer)
+OSStatus Driver::doIO(AudioObjectID device, UInt32 op, UInt32 frames,
+                      const AudioServerPlugInIOCycleInfo* cycle, void* mainBuffer)
 {
-    UInt32 bpf = mBytesPerFrame.load(std::memory_order_relaxed);
-    if (bpf == 0 || !mainBuffer ||
+    if (!mainBuffer ||
         (op != kAudioServerPlugInIOOperationWriteMix && op != kAudioServerPlugInIOOperationReadInput))
         return kAudioHardwareNoError;
     (void)cycle;
+
+    // --- Device2: the system-output capture device (fixed canonical format) ---
+    // The system plays into it; we apply the system-audio volume and produce the audio
+    // into the capture ring for the app's Mac lane. (Output-only — never ReadInput.)
+    if (device == kObjectID_Device2) {
+        if (op != kAudioServerPlugInIOOperationWriteMix) return kAudioHardwareNoError;
+        // Report the negotiated IO buffer size once per session (apps allocate buffers
+        // at start, reuse them, and free at stop — not per cycle).
+        if (!mLoggedBufferSize2.exchange(true)) {
+            os_log(gLog, "Device2 IO buffer = %u frames (set by coreaudiod/client)", frames);
+        }
+        applyGain(mainBuffer, frames, mCaptureVolume.load(std::memory_order_relaxed), mFormat2);
+        RingOutFormat fmt{ mFormat2.mChannelsPerFrame, mFormat2.mBitsPerChannel,
+                           (mFormat2.mFormatFlags & kAudioFormatFlagIsFloat) != 0 };
+        mCaptureRing.produce(mainBuffer, frames, fmt);
+        return kAudioHardwareNoError;
+    }
+
+    // --- Device: the loopback mic ---
+    UInt32 bpf = mBytesPerFrame.load(std::memory_order_relaxed);
+    if (bpf == 0) return kAudioHardwareNoError;
 
     if (op == kAudioServerPlugInIOOperationWriteMix) {
         // The device output isn't looped anywhere — the input comes from the app's

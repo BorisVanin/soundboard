@@ -119,7 +119,11 @@ tools:
 #   make latency OUTPUT="DELL S2721QS" DURATION=4 # longer square
 LM_DERIVED := LatencyMeter/build
 DURATION   ?= 2
-latency: gen
+# Self-contained: regenerate only the LatencyMeter project and rebuild its binary
+# every run (no full `gen` of all modules), then measure.
+latency:
+	@echo "==> xcodegen LatencyMeter"
+	@( cd LatencyMeter && mise exec -- xcodegen generate )
 	xcodebuild -project LatencyMeter/LatencyMeter.xcodeproj -scheme LatencyMeter \
 		-configuration Debug -destination '$(DESTINATION)' \
 		-derivedDataPath $(LM_DERIVED) build

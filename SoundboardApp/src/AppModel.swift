@@ -43,6 +43,9 @@ final class AppModel {
     @ObservationIgnored private(set) var recordControl: MIDIButton!
     /// Assignable on/off for monitoring the mix on an output device.
     @ObservationIgnored private(set) var monitorControl: MIDIButton!
+    /// Monitor lane fader + mute (its volume / mute), mirroring Mic and Mac.
+    @ObservationIgnored private(set) var monitorLevel: MIDIFader!
+    @ObservationIgnored private(set) var monitorMute: MIDIButton!
     @ObservationIgnored var lines: [any MIDIControl] = []
 
     /// Stable per-line identities (router/persistence keys).
@@ -51,6 +54,7 @@ final class AppModel {
         static let macLevel: Int32 = 3, macMute: Int32 = 4
         static let mediaPlayPause: Int32 = 5, mediaNext: Int32 = 6, mediaPrev: Int32 = 7
         static let record: Int32 = 8, monitor: Int32 = 9
+        static let monitorLevel: Int32 = 10, monitorMute: Int32 = 11
     }
 
     // MARK: The clutch (single source of truth, req 3)
@@ -136,14 +140,17 @@ final class AppModel {
     @ObservationIgnored var isTerminating = false
 
     struct Snapshot {
-        var micLevel: Float, macLevel: Float
-        var micMute: Bool, macMute: Bool
+        var micLevel: Float, macLevel: Float, monitorLevel: Float
+        var micMute: Bool, macMute: Bool, monitorMute: Bool
         var micOn: Bool, mic: String?, lastMic: String?, record: Bool, monitor: Bool
     }
     @ObservationIgnored var snapshot: Snapshot?
 
     static let configKey = "SoundboardConfig"
     static let multiOutputUID = "ca.borisvanin.soundboard.multiout"
+    /// The system-output capture device. Selectable as the Mac (system output) source,
+    /// but excluded from the Monitor list (you don't monitor into the capture device).
+    static let systemOutputUID = "ca.borisvanin.soundboard.system"
     /// Legacy private-aggregate UID (MicMonitor's old device); kept only to filter
     /// any stale instance out of the device lists.
     static let legacyMonitorUID = "ca.borisvanin.soundboard.micmonitor"
@@ -177,8 +184,18 @@ final class AppModel {
         if macSourceUID == nil || AudioDevices.deviceID(forUID: macSourceUID!) == nil {
             macSourceUID = AudioDevices.defaultOutputDeviceUID()   // default: tap what you hear
         }
+        // At launch, make the system output match the Mac selection (so audio routes
+        // through Soundboard when "Soundboard System" is chosen, as it was last quit).
+        if let uid = macSourceUID, let dev = AudioDevices.deviceID(forUID: uid) {
+            AudioDevices.setDefaultOutputDevice(dev)
+        }
         if monitorOutputUID == nil || AudioDevices.deviceID(forUID: monitorOutputUID!) == nil {
             monitorOutputUID = AudioDevices.defaultOutputDeviceUID()   // default: where you're listening
+        }
+        // Never monitor into the capture device — that would loop the mix back into the
+        // system-audio capture. Fall back to a real output.
+        if monitorOutputUID == Self.systemOutputUID {
+            monitorOutputUID = monitorOutputs.first?.uid
         }
         restoreAssignments()             // re-apply saved MIDI maps (by lineID)
         isLoaded = true
@@ -201,10 +218,10 @@ final class AppModel {
     private func buildLines(config: PersistedConfig) {
         buildMicLines(config: config)
         buildMediaLines()
-        buildTransportLines()
+        buildTransportLines(config: config)
         lines = [micLevel, micMute, micOnOff, macLevel, macMute,
-                 mediaPlayPause, mediaNext, mediaPrev, recordControl, monitorControl]
-        setupRemoteControl()
+                 mediaPlayPause, mediaNext, mediaPrev, recordControl,
+                 monitorControl, monitorLevel, monitorMute]
     }
 
     /// Mic + system ("Mac") lanes: faders and mutes that feed the mixer, plus the
@@ -253,8 +270,8 @@ final class AppModel {
         }
     }
 
-    /// Record and monitor toggles.
-    private func buildTransportLines() {
+    /// Record and monitor toggles, plus the monitor lane's fader + mute.
+    private func buildTransportLines(config: PersistedConfig) {
         recordControl = MIDIButton(lineID: Line.record, kind: .toggle, initialOn: false) { [weak self] isOn in
             guard let self, self.clutchEngaged else { return }
             if isOn { self.startRecording() } else { self.stopRecording() }
@@ -266,6 +283,20 @@ final class AppModel {
             self.monitorEnabled = isOn
             self.applyMonitor()
             self.saveNow()
+        }
+
+        let mon = config.channels["monitor"]
+        monitorLevel = MIDIFader(lineID: Line.monitorLevel, initial: monitorVolume) { [weak self] value in
+            guard let self, self.clutchEngaged else { return }
+            self.monitorVolume = value
+            self.mixEngine.setMonitorVolume(self.monitorMute.isOn ? 0 : value)
+            self.scheduleSave()
+        }
+        monitorMute = MIDIButton(lineID: Line.monitorMute, kind: .toggle,
+                                 initialOn: mon?.isMuted ?? false) { [weak self] muted in
+            guard let self, self.clutchEngaged else { return }
+            self.mixEngine.setMonitorVolume(muted ? 0 : self.monitorLevel.rawValue)
+            self.scheduleSave()
         }
     }
 }

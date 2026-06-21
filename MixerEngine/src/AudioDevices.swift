@@ -157,6 +157,23 @@ public nonisolated enum AudioDevices {
             device, &address, 0, nil, UInt32(MemoryLayout<UInt32>.size), &value) == noErr
     }
 
+    /// Whether `device` exposes a settable output volume control (the main element, or
+    /// failing that channel 1). Used to disable the Mac fader/mute for output devices
+    /// that have no software volume (e.g. some HDMI/optical outs).
+    public static func hasSettableVolume(_ device: AudioDeviceID) -> Bool {
+        for element in [kAudioObjectPropertyElementMain, AudioObjectPropertyElement(1)] {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyVolumeScalar,
+                mScope: kAudioObjectPropertyScopeOutput, mElement: element)
+            guard AudioObjectHasProperty(device, &address) else { continue }
+            var settable: DarwinBoolean = false
+            if AudioObjectIsPropertySettable(device, &address, &settable) == noErr, settable.boolValue {
+                return true
+            }
+        }
+        return false
+    }
+
     public static func deviceID(forUID uid: String) -> AudioDeviceID? {
         var cfUID = uid as CFString
         var device = AudioDeviceID(kAudioObjectUnknown)

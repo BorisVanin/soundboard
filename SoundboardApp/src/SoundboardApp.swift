@@ -10,7 +10,9 @@ struct SoundboardApp: App {
         WindowGroup(id: "main") {
             RootView(model: model)
         }
-        .windowResizability(.contentSize)
+        // contentMinSize (not contentSize) so the window is user-resizable wider than
+        // its minimum — the three flexible lanes then spread evenly across the width.
+        .windowResizability(.contentMinSize)
 
         MenuBarExtra {
             SoundMenu(model: model)
@@ -92,7 +94,7 @@ struct RootView: View {
             Divider()
             MixerPage(model: model)
         }
-        .frame(minWidth: 560, minHeight: 440)
+        .frame(minWidth: 720, minHeight: 440)
         .onAppear {
             model.windowBecameVisible()
             installEscMonitor()
@@ -213,7 +215,7 @@ struct SoundMenu: View {
                 DeviceRow(name: "None", selected: !model.monitorEnabled) {
                     model.selectMonitorOutput(nil)
                 }
-                ForEach(model.availableOutputs) { device in
+                ForEach(model.monitorOutputs) { device in
                     DeviceRow(
                         name: device.name,
                         selected: model.monitorEnabled && device.uid == model.monitorOutputUID

@@ -21,7 +21,7 @@ $(DIST):
 
 # Control + log CLI (drive the running app, tail app/driver logs).
 $(DIST)/soundboardctl: soundboardctl.swift | $(DIST)
-	$(SWIFTC) $(SWIFTFLAGS) soundboardctl.swift -framework Foundation -o $@
+	$(SWIFTC) $(SWIFTFLAGS) soundboardctl.swift -framework Foundation -framework CoreAudio -o $@
 
 # System-audio process-tap reference (writes captured audio into a ring).
 $(DIST)/tap_feed: tap_feed.swift RingAtomics.h | $(DIST)

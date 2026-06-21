@@ -1,9 +1,10 @@
 import SwiftUI
 
-/// The system-audio ("Mac") input lane (right): a source picker + one gain fader
-/// and mute, mirroring the Mic lane. Driven by `MixEngine`'s global process tap
-/// (`MacSoundLane`), which runs independently of the mic — so its live meter shows
-/// system-audio activity whether or not a mic is selected.
+/// The system-audio ("Mac") lane (middle): the system-output picker + one gain fader
+/// and mute. The picker sets the macOS default output (choose "Soundboard System" to
+/// route system audio through Soundboard, captured via the capture ring). The fader +
+/// mute control the selected output device's volume; both are disabled when that device
+/// has no software volume control.
 struct MacLane: View {
     @Bindable var model: AppModel
 
@@ -11,8 +12,6 @@ struct MacLane: View {
         VStack(spacing: 14) {
             HStack {
                 Text("Mac").font(.callout).foregroundStyle(.secondary)
-                // Selects which output device's audio the Mac lane records. Read-only:
-                // it never changes the system's default output device.
                 Picker("Mac", selection: Binding(
                     get: { model.macSourceUID ?? "" },
                     set: { if !$0.isEmpty { model.setMacSource($0) } }
@@ -23,7 +22,7 @@ struct MacLane: View {
                 }
                 .labelsHidden()
                 .disabled(model.assigning)
-                .help("Which output device's audio to record. This doesn't change your system output.")
+                .help("Sets your system output. Choose “Soundboard System” to route Mac audio through Soundboard.")
             }
             Divider()
             Spacer(minLength: 0)
@@ -32,12 +31,12 @@ struct MacLane: View {
                 Spacer(minLength: 0)
                 VolumeStrip(model: model, title: "Mac", systemImage: "desktopcomputer",
                             levelLine: model.macLevel, muteLine: model.macMute,
+                            enabled: model.macSupportsVolume,
                             meterKeyPath: \.macMeter)
                 Spacer(minLength: 0)
             }
             Spacer(minLength: 0)
         }
-        // Matches MicLane's width so the two panes stay equal (see note there).
-        .frame(width: 280)
+        .frame(maxWidth: .infinity)
     }
 }

@@ -41,6 +41,14 @@ public:
     // ring. Never blocks, allocates, or logs.
     uint32_t consume(void* dst, uint32_t frames, const RingOutFormat& fmt);
 
+    // Realtime produce (capture ring, reverse direction): the driver is the producer.
+    // Convert `frames` of `src` (in `fmt`, the device's WriteMix format) to canonical
+    // float stereo and append to the ring; drop the newest on full (the app consumer
+    // has priority). Returns frames written. Never blocks, allocates, or logs. A given
+    // RingOwner is used as EITHER a consumer (mix ring) or a producer (capture ring),
+    // never both, so the liveness members below are shared between the two paths.
+    uint32_t produce(const void* src, uint32_t frames, const RingOutFormat& fmt);
+
     // Liveness tuning + inspection (tests).
     void setHeartbeatStallLimit(uint32_t cycles) { mStallLimit = cycles; }
     SoundboardRingHeader* header() const { return mHdr; }
@@ -48,6 +56,7 @@ public:
 private:
     void silenceAll(void* dst, uint32_t frames, const RingOutFormat& fmt) const;
     void writeFrame(void* dst, uint32_t f, float L, float R, const RingOutFormat& fmt) const;
+    void readFrame(const void* src, uint32_t f, const RingOutFormat& fmt, float& L, float& R) const;
 
     char     mName[128] = {0};
     int      mFd        = -1;

@@ -24,4 +24,12 @@
 #define kSoundboardCustomProperty_Levels 'sblv'
 #define kSoundboardCustomProperty_Levels_Value 0x73626C76U
 
+// Custom property: turn the app's per-second buffer-occupancy logging on/off
+// (settable). CFData of one UInt32 (0 = off, default; nonzero = on). The driver only
+// stores + advertises the flag (a cross-process control channel); the running app
+// observes changes and enables/disables the logging (off by default to save CPU).
+// FourCharCode 'sblg'.
+#define kSoundboardCustomProperty_StatsLog 'sblg'
+#define kSoundboardCustomProperty_StatsLog_Value 0x73626C67U
+
 #endif /* SoundboardControlProtocol_h */

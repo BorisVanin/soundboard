@@ -268,9 +268,16 @@ func risingEdges(_ x: [Float], _ sr: Double) -> [Int] {
     let mags = diff.map { abs($0) }.sorted()
     let med = mags[mags.count/2]
     let thr = max(med * 8, Float(SQ_AMP) * 0.25)      // rising step ~ a quarter of the amplitude
+    // The refractory (edge de-bounce) MUST be shorter than the latency we want to
+    // resolve. The reference and delayed onsets sit one latency apart on the same
+    // half-cycle; if the window is longer than the latency they merge into one edge,
+    // and edges[1] then lands on the *next square period* — reporting the period
+    // (~2000 ms) instead of the true delay. 1 ms resolves any real device latency
+    // while still de-bouncing a single edge's ringing.
+    let refractory = max(1, Int(0.001 * sr))
     var edges: [Int] = []; var last = -Int(sr)
     for i in 1..<diff.count where diff[i] > thr {
-        if i - last > Int(0.015 * sr) { edges.append(i); last = i }
+        if i - last > refractory { edges.append(i); last = i }
         else { last = i }
     }
     return edges
@@ -293,6 +300,17 @@ if edges.count < 2 {
 let tRefMs = Double(edges[0]) / sr * 1000
 let tDelMs = Double(edges[1]) / sr * 1000
 let latency = tDelMs - tRefMs
+// A gap near the square half-period means the reference and delayed onsets merged
+// (latency below the refractory) and edges[1] is the next period, not the delayed
+// copy — report that rather than a bogus period-as-latency reading.
+let halfPeriodMs = 1.0 / SQ_FREQ * 1000 / 2
+if latency > halfPeriodMs * 0.9 {
+    print(String(format: "!! gap %.1f ms ≈ a square half-period — the reference and delayed onsets likely",
+                 latency))
+    print("   merged (latency below the detector's resolution) or the delayed copy was missed.")
+    print("   Inspect \(outPath).")
+    exit(4)
+}
 print(String(format: "reference onset  %8.2f ms", tRefMs))
 print(String(format: "delayed onset    %8.2f ms", tDelMs))
 print(String(format: "──────────────────────────────"))

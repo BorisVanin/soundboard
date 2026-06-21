@@ -21,14 +21,29 @@ extension AppModel {
         AudioDevices.destroyAggregate(agg)
     }
 
-    /// Pick which output device's audio the Mac lane records. This only *reads* that
-    /// device's stream via the process tap — it never changes the system's default
-    /// output device or any other system audio setting.
+    /// Pick the system output device for the Mac lane. This now *sets the macOS default
+    /// output* to `uid` (where your Mac audio plays): choose "Soundboard System" to route
+    /// system audio through Soundboard. The Mac fader/mute then control that device's
+    /// volume (driver-applied for "Soundboard System").
     func setMacSource(_ uid: String) {
         guard uid != Self.multiOutputUID, uid != loopbackUID else { return }
         macSourceUID = uid
+        if let dev = AudioDevices.deviceID(forUID: uid) { AudioDevices.setDefaultOutputDevice(dev) }
         reconfigureMonitor()
         saveNow()
+    }
+
+    /// Whether the selected Mac (system output) device exposes a software volume control.
+    /// The Mac fader + mute are disabled when it doesn't.
+    var macSupportsVolume: Bool {
+        guard let uid = macSourceUID, let dev = AudioDevices.deviceID(forUID: uid) else { return false }
+        return AudioDevices.hasSettableVolume(dev)
+    }
+
+    /// Output devices eligible for the Monitor lane — everything except the system-output
+    /// capture device (monitoring into it would loop the mix back into the capture).
+    var monitorOutputs: [AudioOutputDevice] {
+        availableOutputs.filter { $0.uid != Self.systemOutputUID }
     }
 
     // MARK: - Source / device discovery

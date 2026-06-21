@@ -16,7 +16,8 @@ extension AppModel {
     func currentConfig() -> PersistedConfig {
         let channels: [String: ChannelSetting] = [
             "mic": .init(level: micLevel.rawValue, isMuted: micMute.isOn),
-            "mac": .init(level: macLevel.rawValue, isMuted: macMute.isOn)
+            "mac": .init(level: macLevel.rawValue, isMuted: macMute.isOn),
+            "monitor": .init(level: monitorLevel.rawValue, isMuted: monitorMute.isOn)
         ]
         // The persisted `firstOutputUID` field now stores the Mac tap-source device.
         return PersistedConfig(firstOutputUID: macSourceUID, channels: channels,
