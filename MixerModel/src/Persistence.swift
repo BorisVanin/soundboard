@@ -61,7 +61,7 @@ public struct PersistedConfig: Codable, Sendable {
         monitorLastMicUID: String? = nil,
         monitorChannels: [String: [Int]] = [:],
         showLevels: Bool = true,
-        monitorEnabled: Bool = false,
+        monitorEnabled: Bool = true,
         monitorOutputUID: String? = nil,
         monitorOutputVolume: Float = 0.5,
         mainWindowOpen: Bool = true
@@ -91,7 +91,7 @@ public struct PersistedConfig: Codable, Sendable {
         monitorLastMicUID = try container.decodeIfPresent(String.self, forKey: .monitorLastMicUID)
         monitorChannels = try container.decodeIfPresent([String: [Int]].self, forKey: .monitorChannels) ?? [:]
         showLevels = try container.decodeIfPresent(Bool.self, forKey: .showLevels) ?? true
-        monitorEnabled = try container.decodeIfPresent(Bool.self, forKey: .monitorEnabled) ?? false
+        monitorEnabled = try container.decodeIfPresent(Bool.self, forKey: .monitorEnabled) ?? true
         monitorOutputUID = try container.decodeIfPresent(String.self, forKey: .monitorOutputUID)
         monitorOutputVolume = try container.decodeIfPresent(Float.self, forKey: .monitorOutputVolume) ?? 0.5
         mainWindowOpen = try container.decodeIfPresent(Bool.self, forKey: .mainWindowOpen) ?? true

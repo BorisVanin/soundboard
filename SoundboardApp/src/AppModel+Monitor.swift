@@ -25,15 +25,14 @@ extension AppModel {
         saveNow()
     }
 
-    /// Set the (smaller) monitor volume fader. Live to the engine; debounced save.
-    func setMonitorVolume(_ value: Float) {
-        monitorVolume = value
-        mixEngine.setMonitorVolume(value)
-        scheduleSave()
-    }
+    /// Set the monitor volume. Routes through the monitor fader line so the lane fader,
+    /// the tray, and persistence stay in sync (its onAction updates the engine + save).
+    func setMonitorVolume(_ value: Float) { monitorLevel.rawValue = value }
 
-    /// Start or stop the monitor to match `monitorEnabled` on the chosen device.
+    /// Start or stop the monitor to match `monitorEnabled` on the chosen device, at the
+    /// mute-adjusted volume.
     func applyMonitor() {
-        mixEngine.setMonitorEnabled(monitorEnabled, deviceUID: monitorOutputUID, volume: monitorVolume)
+        let volume = monitorMute.isOn ? 0 : monitorVolume
+        mixEngine.setMonitorEnabled(monitorEnabled, deviceUID: monitorOutputUID, volume: volume)
     }
 }

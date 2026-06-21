@@ -124,6 +124,69 @@ uint32_t RingOwner::consume(void* dst, uint32_t frames, const RingOutFormat& fmt
     return give;
 }
 
+uint32_t RingOwner::produce(const void* src, uint32_t frames, const RingOutFormat& fmt)
+{
+    SoundboardRingHeader* h = mHdr;
+    if (!h) { /* not created: nowhere to write */ return 0; }
+
+    // Gate: only fill when a granted, alive, live app consumer is present — so a
+    // ring with nobody draining doesn't accumulate stale system audio.
+    uint64_t granted = mGranted.load(std::memory_order_acquire);
+    if (granted == 0 ||
+        __atomic_load_n(&h->driverState, __ATOMIC_ACQUIRE) != kSoundboardRingAlive ||
+        __atomic_load_n(&h->appSession,  __ATOMIC_ACQUIRE) != granted) {
+        return 0;
+    }
+    // Liveness (RT-owned): the app advances `heartbeat` while it drains; if it stops
+    // for too many cycles the consumer is gone, so stop producing.
+    uint64_t beat = __atomic_load_n(&h->heartbeat, __ATOMIC_ACQUIRE);
+    if (granted != mSeenGrant) {
+        mSeenGrant = granted; mLastBeat = beat; mStall = 0;
+    } else if (beat == mLastBeat) {
+        if (++mStall > mStallLimit) return 0;
+    } else {
+        mLastBeat = beat; mStall = 0;
+    }
+
+    // Lock-free SPSC append with consumer priority: drop the newest on full.
+    uint64_t w = __atomic_load_n(&h->writeIndex, __ATOMIC_RELAXED);
+    uint64_t r = __atomic_load_n(&h->readIndex,  __ATOMIC_ACQUIRE);
+    uint64_t used = w - r;
+    if (used >= mCap) return 0;                            // full → drop
+    uint32_t freeF = (uint32_t)(mCap - used);
+    uint32_t give  = frames < freeF ? frames : freeF;
+
+    for (uint32_t f = 0; f < give; ++f) {
+        float L, R; readFrame(src, f, fmt, L, R);
+        uint64_t slot = ((w + f) & (mCap - 1)) * mChannels;
+        mData[slot + 0] = L;
+        if (mChannels > 1) mData[slot + 1] = R;
+    }
+    __atomic_store_n(&h->writeIndex, w + give, __ATOMIC_RELEASE);
+    return give;
+}
+
+void RingOwner::readFrame(const void* src, uint32_t f, const RingOutFormat& fmt, float& L, float& R) const
+{
+    const uint32_t ch = fmt.channels;
+    auto* frame = static_cast<const unsigned char*>(src) + (size_t)f * ch * (fmt.bits / 8);
+    auto sample = [&](uint32_t c) -> float {
+        const void* slot = frame + c * (fmt.bits / 8);
+        if (fmt.isFloat && fmt.bits == 32)       return *static_cast<const float*>(slot);
+        else if (!fmt.isFloat && fmt.bits == 16) return *static_cast<const int16_t*>(slot) / 32768.0f;
+        else if (!fmt.isFloat && fmt.bits == 32) return *static_cast<const int32_t*>(slot) / 2147483648.0f;
+        else if (!fmt.isFloat && fmt.bits == 24) {
+            auto* b = static_cast<const unsigned char*>(slot);
+            int32_t s = b[0] | (b[1] << 8) | (b[2] << 16);
+            if (s & 0x800000) s |= ~0xFFFFFF;             // sign-extend
+            return s / 8388608.0f;
+        }
+        return 0.0f;
+    };
+    L = sample(0);
+    R = (ch > 1) ? sample(1) : L;                          // mono → duplicate to both
+}
+
 void RingOwner::writeFrame(void* dst, uint32_t f, float L, float R, const RingOutFormat& fmt) const
 {
     const uint32_t ch = fmt.channels;

@@ -9,7 +9,7 @@ struct MicLane: View {
     var body: some View {
         VStack(spacing: 14) {
             HStack {
-                Text("Microphone").font(.callout).foregroundStyle(.secondary)
+                Text("Mic").font(.callout).foregroundStyle(.secondary)
                 // The mic On/Off line has no fader, so its assign chip floats over
                 // the picker (the picker goes inert while assigning).
                 Picker("Microphone", selection: Binding(
@@ -39,10 +39,9 @@ struct MicLane: View {
             }
             Spacer(minLength: 0)
         }
-        // A definite width (vs maxWidth: .infinity) gives the window a natural size
-        // to fit under .windowResizability(.contentSize); both lanes share it so the
-        // panes stay equal and the divider sits centered.
-        .frame(width: 280)
+        // Flexible width: the three lanes share the window evenly (centered content),
+        // so they spread out as the window widens.
+        .frame(maxWidth: .infinity)
     }
 
     /// Checkboxes for each channel of the selected mic.

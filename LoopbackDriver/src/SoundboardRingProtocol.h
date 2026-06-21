@@ -10,6 +10,7 @@
 #include <stddef.h>
 
 #define kSoundboardRingName          "/soundboard.mix"
+#define kSoundboardCaptureRingName   "/soundboard.capture"  // driver→app: tapped system output
 #define kSoundboardRingMagic         0x53424D58u   // 'SBMX'
 #define kSoundboardRingVersion       1u
 #define kSoundboardRingChannels      2u            // canonical interior channels

@@ -1,0 +1,70 @@
+name: LatencyMeter
+
+# Composable target templates, vendored at ./xcodegen-templates (mise run templates).
+# ${TEMPLATES_HOME} / ${PROJECT_HOME} expand at generate time (exported by .envrc).
+include:
+  - ${TEMPLATES_HOME}/Base.yml
+  - ${TEMPLATES_HOME}/CodeSignAuto.yml
+  - ${TEMPLATES_HOME}/CodeSignDevID.yml
+  - ${TEMPLATES_HOME}/SwiftLint.yml
+  - ${TEMPLATES_HOME}/BuildNumber.yml
+
+options:
+  bundleIdPrefix: ca.borisvanin
+  deploymentTarget:
+    macOS: "14.2"
+  xcodeVersion: "16.2"
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    SUPPORTED_PLATFORMS: "macosx"
+
+targets:
+  # A small .app bundle (not a bare CLI tool) on purpose: capturing the Scarlett
+  # loopback needs Microphone (TCC) permission, which requires a signed bundle
+  # carrying NSMicrophoneUsageDescription. An unbundled binary inherits the
+  # parent terminal's TCC identity and is silently fed zeros without it.
+  LatencyMeter:
+    type: application
+    platform: macOS
+    templates:
+      - Base
+      - CodeSignDevID
+      - BuildNumber
+      # SwiftLint intentionally omitted: this measurement tool uses terse DSP-style
+      # identifiers (i, sr, fp, …) that the shared lint config rejects as errors.
+    sources:
+      - src
+    entitlements:
+      path: LatencyMeter.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.security.device.audio-input: true
+    settings:
+      base:
+        PRODUCT_NAME: LatencyMeter
+        PRODUCT_BUNDLE_IDENTIFIER: ${PROJECT_IDENTIFIER}.latencymeter
+        # CLI-style: no dock icon, runs and exits. stdout shows when launched from a shell.
+        INFOPLIST_KEY_LSUIElement: YES
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "LatencyMeter records the Scarlett 2i2 loopback to measure the audio delay the Soundboard pipeline adds."
+        PROVISIONING_PROFILE_SPECIFIER: ""
+      configs:
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG $(inherited)"
+          SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+        Release:
+          SWIFT_COMPILATION_MODE: wholemodule
+
+# Shared scheme so `xcodebuild -scheme LatencyMeter` works from the CLI and
+# survives `make gen` (which regenerates the project each time).
+schemes:
+  LatencyMeter:
+    build:
+      targets:
+        LatencyMeter: all
+    run:
+      config: Debug
+    archive:
+      config: Release

@@ -14,7 +14,7 @@
 # (projectReferences need the referenced .xcodeproj on disk at generation time):
 # model first, then engine/midi/driver-control, then the HAL driver + the app.
 MODULES_LIB   = MixerModel MixerEngine MIDISurface DriverControl
-MODULES_APP   = LoopbackDriver SoundboardApp
+MODULES_APP   = LoopbackDriver SoundboardApp LatencyMeter
 MODULES       = $(MODULES_LIB) $(MODULES_APP)
 WORKSPACE     = Soundboard.xcworkspace
 SCHEME        = Soundboard
@@ -41,7 +41,7 @@ export PKG_IDENTIFIER  := $(PROJECT_IDENTIFIER).pkg
 export PKG_SCRIPTS_DIR := $(abspath pkg-scripts)
 
 .PHONY: all gen generate_workspace debug release open clean scratch \
-        pkg dmg dist test tools
+        pkg dmg dist test tools latency
 
 all: gen
 
@@ -109,3 +109,26 @@ test:
 # Build the dev CLI tools (soundboardctl, tap_feed, make_icon) into dist/.
 tools:
 	$(MAKE) -C tools
+
+# Audio-latency measurement app. Builds LatencyMeter.app and measures the delay the
+# Soundboard pipeline adds for a given OUTPUT device, via a {OUTPUT + Scarlett 2i2}
+# multi-output and the Scarlett's hardware loopback. REQUIRES a Scarlett 2i2 + the
+# app's Microphone permission (approve the TCC prompt on first run).
+#
+#   make latency OUTPUT="DELL S2721QS"            # measure for the DELL
+#   make latency OUTPUT="DELL S2721QS" DURATION=4 # longer square
+LM_DERIVED := LatencyMeter/build
+DURATION   ?= 2
+# Self-contained: regenerate only the LatencyMeter project and rebuild its binary
+# every run (no full `gen` of all modules), then measure.
+latency:
+	@echo "==> xcodegen LatencyMeter"
+	@( cd LatencyMeter && mise exec -- xcodegen generate )
+	xcodebuild -project LatencyMeter/LatencyMeter.xcodeproj -scheme LatencyMeter \
+		-configuration Debug -destination '$(DESTINATION)' \
+		-derivedDataPath $(LM_DERIVED) build
+	@APP="$(LM_DERIVED)/Build/Products/Debug/LatencyMeter.app/Contents/MacOS/LatencyMeter"; \
+	if [ -z '$(OUTPUT)' ]; then echo "usage: make latency OUTPUT=\"<output device name>\" [DURATION=2]"; exit 2; fi; \
+	mkdir -p dist/latency; \
+	echo "==> $$APP \"$(OUTPUT)\" --duration $(DURATION)"; \
+	"$$APP" "$(OUTPUT)" --out dist/latency/latency-$(DURATION)s.wav --duration $(DURATION)

@@ -158,3 +158,28 @@ counts; capacity is a power of two.
 
 `version` gates the layout. A consumer/producer that sees a `version` it doesn't
 understand refuses to attach (silence) rather than guessing.
+
+## 11. Device-control properties (the "Soundboard System" output device)
+
+Beyond the ring discovery/claim handshake, the **system-output capture device**
+("Soundboard System", UID `ca.borisvanin.soundboard.system`) exposes one custom HAL
+control property, read/written cross-process with `AudioObjectGet/SetPropertyData`
+on the device object. Selectors live in `SoundboardControlProtocol.h`. It is set from
+`soundboardctl`, never from the app UI.
+
+| Property | Selector | Type | Dir | Meaning |
+|----------|----------|------|-----|---------|
+| StatsLog | `'sblg'` | CFData(UInt32) | settable | `0` = off (default), nonzero = on. The driver only stores the flag and notifies listeners; the running app observes it and turns its per-second buffer-occupancy logging on/off. Off by default to save CPU. |
+
+**Setting it.** `soundboardctl stats on|off` resolves the device by UID and sets the
+property via the HAL — the driver must be installed and the app running to react.
+`soundboardctl get` prints the current value (and the device's IO buffer size, which
+coreaudiod negotiates with the playing app — the driver cannot constrain it).
+
+**Buffer sizing (not controllable).** A client negotiates the IO buffer size once when
+it starts IO (it allocates buffers, reuses them every cycle, frees them at stop). For a
+virtual (AudioServerPlugIn) device the size is chosen by coreaudiod from the client's
+request; the plugin cannot force it smaller (advertising a smaller
+`BufferFrameSizeRange` is ignored, and trying to renegotiate it wedges coreaudiod). The
+driver just **logs the negotiated size once per IO session** (`category=driver`:
+`Device2 IO buffer = N frames`).

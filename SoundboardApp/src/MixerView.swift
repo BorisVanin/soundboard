@@ -13,6 +13,8 @@ struct MixerPage: View {
                 MicLane(model: model)
                 Divider()
                 MacLane(model: model)
+                Divider()
+                MonitorLane(model: model)
             }
             Divider()
             mediaRow
@@ -44,13 +46,11 @@ struct MixerPage: View {
 
 // MARK: - Monitor button (transport row, far right)
 
-/// Toggle playback of the mix to a chosen output device, so the operator hears
-/// what Soundboard is sending. Left-click starts/stops; right-click opens a small
-/// config popover (output device + a compact volume fader) anchored above it.
-/// Assignable like any other control.
+/// Toggle playback of the mix to the monitor output so the operator hears what
+/// Soundboard is sending. On by default; while off, the Monitor lane's fader and
+/// mute are disabled. Assignable like any other control.
 private struct MonitorButton: View {
     @Bindable var model: AppModel
-    @State private var showConfig = false
 
     var body: some View {
         let isOn = model.monitorEnabled
@@ -63,45 +63,47 @@ private struct MonitorButton: View {
         .buttonStyle(.bordered)
         .allowsHitTesting(!model.assigning)
         .overlay { if model.assigning { AssignLabel(model: model, line: model.monitorControl) } }
-        .overlay { if !model.assigning { RightClickCatcher { showConfig = true } } }
-        .popover(isPresented: $showConfig, arrowEdge: .bottom) { MonitorConfig(model: model) }
-        .help(isOn ? "Monitoring the mix. Click to stop; right-click to configure."
-                   : "Play the mix to an output device so you can hear it. Click to start; right-click to choose.")
+        .help(isOn ? "Monitoring the mix. Click to stop." : "Play the mix to the monitor output. Click to start.")
     }
 }
 
-/// The slide-up config for the Monitor button: pick the output device and set a
-/// compact volume fader (a third the height of the Mic/Mac faders).
-private struct MonitorConfig: View {
+// MARK: - Monitor lane (right): output picker + fader/mute, like Mic/Mac
+
+/// The monitor lane: pick the output device the mix plays to, and a fader + mute
+/// (its volume). Disabled while monitoring is off (toggle with the headphones
+/// button). The "Soundboard System" capture device is excluded from the picker.
+struct MonitorLane: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Monitor").font(.caption.bold())
-            Picker("Output", selection: Binding(
-                get: { model.monitorOutputUID ?? "" },
-                set: { if !$0.isEmpty { model.setMonitorOutput($0) } }
-            )) {
-                ForEach(model.availableOutputs) { device in
-                    Text(device.name).tag(device.uid)
+        VStack(spacing: 14) {
+            HStack {
+                Text("Monitor").font(.callout).foregroundStyle(.secondary)
+                Picker("Monitor", selection: Binding(
+                    get: { model.monitorOutputUID ?? "" },
+                    set: { if !$0.isEmpty { model.setMonitorOutput($0) } }
+                )) {
+                    ForEach(model.monitorOutputs) { device in
+                        Text(device.name).tag(device.uid)
+                    }
                 }
+                .labelsHidden()
+                .disabled(model.assigning)
+                .help("The output device the mix is played to (what you hear).")
             }
-            .labelsHidden()
+            Divider()
+            Spacer(minLength: 0)
 
-            // Horizontal volume fader.
-            let volume = Binding(get: { model.monitorVolume }, set: { model.setMonitorVolume($0) })
-            HStack(spacing: 8) {
-                Image(systemName: "speaker.fill").font(.caption2).foregroundStyle(.secondary)
-                Slider(value: Binding(get: { Double(volume.wrappedValue) },
-                                      set: { volume.wrappedValue = Float($0) }), in: 0...1)
-                    .scrollAdjust(volume, axis: .horizontal)
-                Text("\(Int(model.monitorVolume * 100))")
-                    .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
-                    .frame(width: 30, alignment: .trailing)
+            HStack(alignment: .center, spacing: 20) {
+                Spacer(minLength: 0)
+                VolumeStrip(model: model, title: "Monitor", systemImage: "headphones",
+                            levelLine: model.monitorLevel, muteLine: model.monitorMute,
+                            enabled: model.monitorEnabled)
+                Spacer(minLength: 0)
             }
+            Spacer(minLength: 0)
         }
-        .frame(width: 240)
-        .padding(14)
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -147,28 +149,6 @@ struct ScrollCatcher: NSViewRepresentable {
             let delta: Float = event.hasPreciseScrollingDeltas ? Float(raw) * 0.0025
                                                                : (raw > 0 ? 0.04 : -0.04)
             onScroll(delta)
-        }
-    }
-}
-
-/// Catches a right-click without stealing left-clicks: `hitTest` claims the point
-/// only while the current event is a right-mouse event, so left-clicks fall through
-/// to the SwiftUI button beneath this overlay.
-private struct RightClickCatcher: NSViewRepresentable {
-    let action: () -> Void
-    func makeNSView(context: Context) -> NSView { CatcherView(action: action) }
-    func updateNSView(_ nsView: NSView, context: Context) {}
-
-    private final class CatcherView: NSView {
-        let action: () -> Void
-        init(action: @escaping () -> Void) { self.action = action; super.init(frame: .zero) }
-        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-        override func rightMouseDown(with event: NSEvent) { action() }
-        override func hitTest(_ point: NSPoint) -> NSView? {
-            switch NSApp.currentEvent?.type {
-            case .rightMouseDown, .rightMouseUp, .rightMouseDragged: return self
-            default: return nil
-            }
         }
     }
 }

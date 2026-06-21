@@ -6,47 +6,6 @@ import MIDISurface
 @MainActor
 extension AppModel {
 
-    // MARK: - Remote control (soundboardctl via DistributedNotificationCenter)
-
-    /// Observe one-way control commands from the `soundboardctl` CLI. App-side
-    /// only — cannot affect coreaudiod. Commands arrive as the notification's
-    /// string `object` (e.g. "mic:on", "gain:0.6", "status", "quit").
-    func setupRemoteControl() {
-        DistributedNotificationCenter.default().addObserver(
-            forName: Notification.Name("ca.borisvanin.soundboard.cmd"),
-            object: nil, queue: .main) { [weak self] note in
-            let cmd = note.object as? String
-            Task { @MainActor [weak self] in
-                guard let self, let cmd else { return }
-                self.handleRemoteCommand(cmd)
-            }
-        }
-    }
-
-    func handleRemoteCommand(_ cmd: String) {
-        let parts = cmd.split(separator: ":", maxSplits: 1).map(String.init)
-        switch parts.first {
-        case "mic":
-            let isOn = parts.count > 1 && parts[1] == "on"
-            selectMonitorMic(isOn ? (lastMonitorMicUID ?? availableInputs.first?.uid) : nil)
-            micOnOff.setSilently(on: selectedMonitorMicUID != nil)
-        case "gain":
-            if parts.count > 1, let value = Float(parts[1]) {
-                micLevel.setSilently(value)
-                mixEngine.setMicGain(value, muted: micMute.isOn)
-            }
-        case "status":
-            midiLog.info("""
-                remote status: mic=\(self.selectedMonitorMicUID ?? "off", privacy: .public) \
-                gain=\(self.micLevel.rawValue) engineRunning=\(self.mixEngine.isRunning)
-                """)
-        case "quit":
-            NSApplication.shared.terminate(nil)
-        default:
-            break
-        }
-    }
-
     // MARK: - MIDI input / routing
 
     func connectMIDI() {
@@ -119,8 +78,8 @@ extension AppModel {
     // MARK: - Assign-mode snapshot (restore feedback movements on exit)
 
     func makeSnapshot() -> Snapshot {
-        Snapshot(micLevel: micLevel.rawValue, macLevel: macLevel.rawValue,
-                 micMute: micMute.isOn, macMute: macMute.isOn,
+        Snapshot(micLevel: micLevel.rawValue, macLevel: macLevel.rawValue, monitorLevel: monitorLevel.rawValue,
+                 micMute: micMute.isOn, macMute: macMute.isOn, monitorMute: monitorMute.isOn,
                  micOn: micOnOff.isOn, mic: selectedMonitorMicUID, lastMic: lastMonitorMicUID,
                  record: recordControl.isOn, monitor: monitorControl.isOn)
     }
@@ -128,7 +87,9 @@ extension AppModel {
         guard let snapshot else { return }
         self.snapshot = nil
         micLevel.setSilently(snapshot.micLevel); macLevel.setSilently(snapshot.macLevel)
+        monitorLevel.setSilently(snapshot.monitorLevel)
         micMute.setSilently(on: snapshot.micMute); macMute.setSilently(on: snapshot.macMute)
+        monitorMute.setSilently(on: snapshot.monitorMute)
         micOnOff.setSilently(on: snapshot.micOn); recordControl.setSilently(on: snapshot.record)
         monitorControl.setSilently(on: snapshot.monitor)
         selectedMonitorMicUID = snapshot.mic; lastMonitorMicUID = snapshot.lastMic
